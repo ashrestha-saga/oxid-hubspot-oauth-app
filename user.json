@@ -1,0 +1,42 @@
+{
+  "users": {
+    "oxusername": "j.smith02@merzljak.de",
+    "oxfname": "Jane02",
+    "oxlname": "Smith02",
+    "mcustnr": "66666692",
+    "oxcreate": "2026-07-31T17:28:36+02:00",
+    "oxstreet": "In der Raste",
+    "oxstreetnr": "14",
+    "oxzip": "53129",
+    "oxcity": "Bonn",
+    "oxcountryid": "a7c40f631fc920687.20179984",
+    "child_ids": [
+      {
+        "oxid": "abc123deliveryaddress01",
+        "oxsal": "MR",
+        "oxfname": "Jane02",
+        "oxlname": "Smith02",
+        "oxcompany": "MWV",
+        "oxstreet": "Lieferstraße",
+        "oxstreetnr": "5",
+        "oxzip": "10115",
+        "oxcity": "Berlin",
+        "oxcountryid": "a7c40f631fc920687.20179984",
+        "oxfon": "+49 30 12345678"
+      },
+      {
+        "oxid": "abc123deliveryaddress02",
+        "oxsal": "MRS",
+        "oxfname": "Anna",
+        "oxlname": "Müller",
+        "oxcompany": "MWV Hamburg",
+        "oxstreet": "Hauptstraße",
+        "oxstreetnr": "22",
+        "oxzip": "20095",
+        "oxcity": "Hamburg",
+        "oxcountryid": "a7c40f631fc920687.20179984",
+        "oxfon": "+49 40 98765432"
+      }
+    ]
+  }
+}

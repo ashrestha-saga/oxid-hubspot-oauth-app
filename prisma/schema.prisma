@@ -1,0 +1,141 @@
+// Bidirectional HubSpot <-> OXID contact sync.
+//
+// Every credential column marked "encrypted" holds the output of
+// src/lib/crypto.ts (AES-256-GCM, `v1:iv:tag:ciphertext`), never plaintext.
+//
+// Local dev uses SQLite (file:./prisma/dev.db). For production Postgres, switch
+// provider to "postgresql", restore @db.Uuid / @db.Timestamptz where needed, and
+// regenerate migrations.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// One row per tenant pairing: a HubSpot portal plus the OXID shop it is linked to.
+model Integration {
+  id   String  @id @default(uuid())
+  name String?
+
+  hubspotPortalId       BigInt?   @unique @map("hubspot_portal_id")
+  hubspotAccessToken    String?   @map("hubspot_access_token") // encrypted
+  hubspotRefreshToken   String?   @map("hubspot_refresh_token") // encrypted
+  hubspotTokenExpiresAt DateTime? @map("hubspot_token_expires_at")
+
+  oxidShopId         String?   @unique @map("oxid_shop_id")
+  oxidBaseUrl        String?   @map("oxid_base_url")
+  oxidApiKey         String?   @map("oxid_api_key") // encrypted
+  oxidAccessToken    String?   @map("oxid_access_token") // encrypted
+  oxidTokenExpiresAt DateTime? @map("oxid_token_expires_at")
+  oxidWebhookSecret  String?   @map("oxid_webhook_secret") // encrypted
+
+  status           String    @default("pending") // pending | active | paused | error
+  lastReconciledAt DateTime? @map("last_reconciled_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  entityMappings EntityMapping[]
+  syncEvents     SyncEvent[]
+  syncJobs       SyncJob[]
+
+  @@index([status])
+  @@map("integrations")
+}
+
+/// Short-lived single-use tokens backing the self-serve connect flow.
+model PairingRequest {
+  id              String   @id @default(uuid())
+  token           String   @unique
+  hubspotPortalId BigInt   @map("hubspot_portal_id")
+  oxidShopUrl     String   @map("oxid_shop_url")
+  used            Boolean  @default(false)
+  expiresAt       DateTime @map("expires_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([hubspotPortalId])
+  @@index([expiresAt])
+  @@map("pairing_requests")
+}
+
+/// One row per synced contact, and the basis for loop detection.
+model EntityMapping {
+  id            String @id @default(uuid())
+  integrationId String @map("integration_id")
+
+  hubspotContactId String? @map("hubspot_contact_id")
+  oxidCustomerId   String? @map("oxid_customer_id")
+
+  lastSyncedAt      DateTime? @map("last_synced_at")
+  /// Hash of the mapped field values as last written. Equal hash => nothing to do.
+  lastSyncedHash    String?   @map("last_synced_hash")
+  /// 'hubspot' | 'oxid'. Audit / tie-break only, never part of the skip condition.
+  sourceOfLastWrite String?   @map("source_of_last_write")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  syncEvents  SyncEvent[]
+
+  // SQLite (like Postgres) treats NULLs as distinct in unique indexes, so these
+  // allow many half-mapped rows per tenant while still preventing two mappings
+  // for the same remote record.
+  @@unique([integrationId, hubspotContactId])
+  @@unique([integrationId, oxidCustomerId])
+  @@index([integrationId])
+  @@map("entity_mappings")
+}
+
+/// Append-only audit trail. Every sync attempt lands here, including skips.
+model SyncEvent {
+  id              String  @id @default(uuid())
+  integrationId   String? @map("integration_id")
+  direction       String // hubspot_to_oxid | oxid_to_hubspot
+  entityMappingId String? @map("entity_mapping_id")
+  status          String // success | error | skipped_loop | skipped_no_email
+  detail          Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  integration   Integration?   @relation(fields: [integrationId], references: [id], onDelete: SetNull)
+  entityMapping EntityMapping? @relation(fields: [entityMappingId], references: [id], onDelete: SetNull)
+
+  @@index([integrationId, createdAt])
+  @@index([entityMappingId])
+  @@index([status])
+  @@map("sync_events")
+}
+
+/// Durable work queue. Webhooks enqueue here and ack immediately, so a slow or
+/// failing destination API can never cause the sender to retry the delivery.
+model SyncJob {
+  id            String @id @default(uuid())
+  integrationId String @map("integration_id")
+
+  direction String // hubspot_to_oxid | oxid_to_hubspot
+  /// Identifies the record being synced, e.g. `hubspot_to_oxid:12345`. Used to
+  /// collapse duplicate pending jobs and to serialize work per record.
+  dedupeKey String @map("dedupe_key")
+  payload   Json
+
+  status    String   @default("pending") // pending | processing | done | failed
+  attempts  Int      @default(0)
+  runAfter  DateTime @default(now()) @map("run_after")
+  lockedAt  DateTime? @map("locked_at")
+  lockedBy  String?   @map("locked_by")
+  lastError String?   @map("last_error")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@index([status, runAfter])
+  @@index([integrationId, dedupeKey, status])
+  @@map("sync_jobs")
+}

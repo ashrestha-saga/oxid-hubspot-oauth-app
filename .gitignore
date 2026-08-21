@@ -1,0 +1,27 @@
+.env
+.env.*
+!.env.example
+
+node_modules/
+dist/
+coverage/
+
+# SQLite database files (created by prisma migrate / dev; paths are relative to schema.prisma)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+prisma/dev.db
+prisma/test.db
+prisma/*.db
+prisma/*.db-*
+
+*.log
+npm-debug.log*
+
+.DS_Store
+Thumbs.db
+
+.idea/
+.vscode/*
+!.vscode/extensions.json
