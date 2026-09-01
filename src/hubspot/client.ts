@@ -223,6 +223,32 @@ export class HubspotClient {
 
     return contacts;
   }
+
+  /** Contact property definitions for the mapping wizard. */
+  async listContactProperties(): Promise<
+    Array<{ name: string; label: string; type: string; modificationMetadata?: unknown }>
+  > {
+    const { body } = await this.request<{
+      results?: Array<{
+        name: string;
+        label: string;
+        type: string;
+        modificationMetadata?: { readOnlyValue?: boolean };
+      }>;
+    }>({
+      method: 'GET',
+      path: '/crm/v3/properties/contacts',
+    });
+
+    return (body?.results ?? [])
+      .filter((property) => !property.modificationMetadata?.readOnlyValue)
+      .map((property) => ({
+        name: property.name,
+        label: property.label,
+        type: property.type,
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }
 }
 
 export function hubspotClientFor(integrationId: string): HubspotClient {

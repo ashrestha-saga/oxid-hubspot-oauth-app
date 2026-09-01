@@ -19,7 +19,6 @@ const testEnv: Record<string, string> = {
   OXID_CLIENT_MODE: 'stub',
   RECONCILE_INTERVAL_MINUTES: '15',
   RUN_WORKER_IN_WEB: 'false',
-  DEV_BYPASS_PAIRING: 'false',
 };
 
 // Assigned unconditionally: an ambient value from the developer's shell, a local

@@ -46,21 +46,29 @@ const envSchema = z.object({
   SESSION_SIGNING_KEY: base64Key32,
 
   OXID_CLIENT_MODE: z.enum(['stub', 'oxapi']).default('stub'),
+  /** Optional; defaults to `${BASE_URL}/oxid/oauth/callback`. */
+  OXID_OAUTH_REDIRECT_URI: z.string().url().optional(),
+  OXID_OAUTH_SCOPES: z
+    .string()
+    .optional()
+    .transform((value) =>
+      (value ?? 'profile,address,api')
+        .split(',')
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+    ),
 
   RECONCILE_INTERVAL_MINUTES: z.coerce.number().int().min(1).default(15),
   RUN_WORKER_IN_WEB: booleanish.default('true'),
   SYNC_WORKER_POLL_MS: z.coerce.number().int().min(250).default(2000),
   SYNC_JOB_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(5),
-
-  /** Auto-pair a stub OXID shop after OAuth (development only). */
-  DEV_BYPASS_PAIRING: booleanish.default('false'),
-  DEV_OXID_SHOP_ID: z.string().uuid().default('00000000-0000-0000-0000-000000000001'),
-  DEV_OXID_SHOP_URL: z.string().url().default('https://dev-shop.local'),
-  DEV_OXID_API_KEY: z.string().min(8).default('dev-oxid-api-key'),
-  DEV_WEBHOOK_SECRET: z.string().min(16).default('dev-webhook-secret-min-16-chars'),
 });
 
-export type Env = z.infer<typeof envSchema>;
+export type Env = z.infer<typeof envSchema> & {
+  BASE_URL: string;
+  HUBSPOT_REDIRECT_URI: string;
+  OXID_OAUTH_REDIRECT_URI: string;
+};
 
 function load(): Env {
   const parsed = envSchema.safeParse(process.env);
@@ -74,6 +82,8 @@ function load(): Env {
   const BASE_URL = parsed.data.BASE_URL.replace(/\/+$/, '');
   const HUBSPOT_REDIRECT_URI =
     parsed.data.HUBSPOT_REDIRECT_URI?.replace(/\/+$/, '') ?? `${BASE_URL}/oauth/callback`;
+  const OXID_OAUTH_REDIRECT_URI =
+    parsed.data.OXID_OAUTH_REDIRECT_URI?.replace(/\/+$/, '') ?? `${BASE_URL}/oxid/oauth/callback`;
 
   if (HUBSPOT_REDIRECT_URI !== `${BASE_URL}/oauth/callback`) {
     throw new Error(
@@ -83,16 +93,9 @@ function load(): Env {
     );
   }
 
-  if (parsed.data.DEV_BYPASS_PAIRING && parsed.data.NODE_ENV === 'production') {
-    throw new Error(
-      'Invalid environment configuration:\n' +
-        '  - DEV_BYPASS_PAIRING cannot be enabled when NODE_ENV=production',
-    );
-  }
-
   // BASE_URL is used verbatim to rebuild the URI HubSpot signed, so a trailing
   // slash there would silently break every webhook signature check.
-  return { ...parsed.data, BASE_URL, HUBSPOT_REDIRECT_URI };
+  return { ...parsed.data, BASE_URL, HUBSPOT_REDIRECT_URI, OXID_OAUTH_REDIRECT_URI };
 }
 
 export const env = load();

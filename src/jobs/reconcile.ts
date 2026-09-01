@@ -5,7 +5,12 @@ import { syncJobsRepo } from '../db/repositories/syncJobs';
 import { hubspotClientFor } from '../hubspot/client';
 import { logger } from '../lib/logger';
 import { oxidClientFor } from '../oxid/client';
-import { fromHubspot, fromOxid, hubspotReadProperties } from '../sync/fieldMap';
+import {
+  canonicalFromHubspot,
+  canonicalFromOxidCustomer,
+  hubspotPropertiesFromMap,
+  parseTenantFieldMap,
+} from '../sync/tenantFieldMap';
 import { contactHash } from '../sync/hash';
 import { dedupeKeyFor } from '../sync/queue';
 import type { SourceRecord } from '../sync/syncContact';
@@ -78,16 +83,17 @@ export async function reconcileIntegration(
   };
 
   try {
+    const map = parseTenantFieldMap(integration.fieldMappingJson);
     const contacts = await hubspotClientFor(integration.id).listModifiedSince(
       since,
-      hubspotReadProperties,
+      hubspotPropertiesFromMap(map),
     );
     summary.hubspotScanned = contacts.length;
 
     for (const contact of contacts) {
       const queued = await enqueueIfChanged(integration.id, 'hubspot_to_oxid', 'hubspot', {
         id: contact.id,
-        fields: fromHubspot(contact),
+        fields: canonicalFromHubspot(contact, map),
       });
       if (queued) summary.queued += 1;
     }
@@ -97,13 +103,15 @@ export async function reconcileIntegration(
   }
 
   try {
+    const map = parseTenantFieldMap(integration.fieldMappingJson);
     const customers = await oxidClientFor(integration).listModifiedSince(since);
     summary.oxidScanned = customers.length;
 
     for (const customer of customers) {
       const queued = await enqueueIfChanged(integration.id, 'oxid_to_hubspot', 'oxid', {
         id: customer.id,
-        fields: fromOxid(customer),
+        fields: canonicalFromOxidCustomer(customer, map),
+        rawOxid: customer as unknown as Record<string, unknown>,
       });
       if (queued) summary.queued += 1;
     }

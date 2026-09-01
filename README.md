@@ -1,8 +1,8 @@
 # HubSpot ↔ OXID contact sync backend
 
 Multi-tenant backend that keeps HubSpot contacts and OXID eShop customers in sync in both
-directions. Each merchant installs the HubSpot app via OAuth and then pairs their own OXID shop
-self-serve — no manual database work.
+directions. Each merchant installs the HubSpot app via OAuth, then connects their OXID shop via
+OAuth 2.0 (Authorization Code + PKCE) — no manual database work.
 
 Implements [hubspot-oxid-contact-sync-implementation-guide.md](hubspot-oxid-contact-sync-implementation-guide.md).
 Contact sync only: no deals, orders, carts, companies or AI features.
@@ -22,7 +22,7 @@ src/config/env.ts             zod-validated environment, fails fast on boot
 src/lib/                      crypto (AES-256-GCM), hmac, hashing, logger, cookie sessions
 src/db/repositories/          one repository per table, all tenant-scoped
 src/hubspot/                  OAuth, token refresh, CRM client, webhook receiver
-src/oxid/                     pairing flow, token cache, webhook receiver, OxidClient port
+src/oxid/                     OXID OAuth, token refresh, webhook receiver, OxidClient port
 src/sync/                     field map, sync engine, queue worker
 src/jobs/reconcile.ts         periodic safety-net reconciliation
 scripts/                      one-off operational scripts
@@ -81,12 +81,12 @@ npm run typecheck
 
 ## Flow overview
 
-1. Merchant opens `/oauth/install`, approves the app. `/oauth/callback` stores encrypted tokens in
-   `integrations` with `status = 'pending'` and issues a signed 30-minute pairing session cookie.
-2. Merchant lands on `/oxid/connect`, enters their shop URL. `/oxid/pair/start` mints a single-use
-   pairing token and redirects them into their own OXID admin.
-3. The OXID module confirms with `/oxid/pair/callback`, which stores the shop credentials and
-   returns the shop's webhook signing secret exactly once. `status` becomes `'active'`.
+1. Merchant opens `/oauth/install`, approves the app. `/oauth/callback` stores encrypted HubSpot
+   tokens in `integrations` with `status = 'pending'` and issues a signed 30-minute session cookie.
+2. Merchant lands on `/oxid/connect`, enters shop URL + OXID OAuth client credentials. Form posts to
+   `/oxid/oauth/start`, which redirects to the shop's `oauthauthorize` endpoint (PKCE).
+3. After login/consent, `/oxid/oauth/callback` exchanges the code, stores OXID access + refresh
+   tokens, generates a webhook secret, sets `status = 'active'`, and redirects to `/oxid/mapping`.
 4. Contact changes arrive at `/webhooks/hubspot` or `/webhooks/oxid/:oxidShopId`, are verified,
    enqueued in `sync_jobs`, and processed by the worker through one shared `syncContact()`.
 5. Every `RECONCILE_INTERVAL_MINUTES` the reconcile job sweeps both sides for anything the webhooks
@@ -98,26 +98,17 @@ npm run typecheck
 | ------------------------------ | ------ | ---------------------------------------------------------- |
 | `/healthz`                     | GET    | Liveness + database check                                  |
 | `/oauth/install`               | GET    | Start HubSpot OAuth                                        |
-| `/oauth/callback`              | GET    | Complete OAuth, upsert integration, issue pairing session   |
-| `/oxid/connect`                | GET    | Pairing form (stand-in for the HubSpot UI extension)        |
-| `/oxid/pair/start`             | POST   | Mint pairing token, return OXID admin redirect URL          |
-| `/oxid/pair/callback`          | POST   | OXID module confirms pairing, returns the webhook secret    |
+| `/oauth/callback`              | GET    | Complete HubSpot OAuth, upsert integration, issue session   |
+| `/oxid/connect`                | GET    | OXID OAuth connect form                                    |
+| `/oxid/oauth/start`            | POST   | Save client creds, redirect to OXID authorize (PKCE)       |
+| `/oxid/oauth/callback`         | GET    | Exchange OXID code, store tokens, redirect to mapping      |
+| `/oxid/mapping`                | GET    | Field mapping wizard (browser)                             |
+| `/api/settings/status`         | GET    | HubSpot Settings: status + webhook URL/secret (sig v3)     |
+| `/api/settings/oauth/start`    | POST   | HubSpot Settings: return OXID authorize URL                |
+| `/api/settings/mapping`        | GET/PUT| HubSpot Settings: read/save per-tenant field map            |
 | `/webhooks/hubspot`            | POST   | HubSpot contact change events (signature v3 verified)       |
 | `/webhooks/oxid/:oxidShopId`   | POST   | OXID customer change events (HMAC verified)                 |
-| `/dev/webhook-credentials`     | GET    | Dev only: fixed OXID webhook URL + signing secret           |
-| `/dev/activate`                | POST   | Dev only: auto-pair stub OXID shop for pending integrations |
-
-## Development bypass (OXID → HubSpot without pairing UI)
-
-Set `DEV_BYPASS_PAIRING=true` in `.env` (blocked when `NODE_ENV=production`). After HubSpot OAuth, a fixed stub OXID shop is attached automatically. Use:
-
-```bash
-curl https://<tunnel>/dev/webhook-credentials
-```
-
-Sign webhooks with the returned `webhook_secret` and POST to `webhook_url`. Defaults: shop id `00000000-0000-0000-0000-000000000001`, secret `dev-webhook-secret-min-16-chars`.
-
-If you OAuth'd before enabling the flag, run `POST /dev/activate` or restart the server.
+| `/webhooks/oxid/:oxidShopId/probe` | POST | Mapping setup: capture sample keys, no sync enqueue     |
 
 ## Implementation notes worth knowing
 
@@ -145,10 +136,9 @@ needed once the shop API is confirmed — see section 3 of
 
 ## Security notes
 
-- All tokens, API keys and webhook secrets are AES-256-GCM encrypted at rest
+- All tokens and webhook secrets are AES-256-GCM encrypted at rest
   (`src/lib/crypto.ts`). Nothing sensitive is ever written in plaintext.
-- `/oxid/pair/start` requires the signed pairing session cookie; the portal id is taken from the
-  session, never from the request body, so nobody can mint a pairing token for a portal they do not
-  control.
+- `/oxid/oauth/start` requires the signed session cookie; the portal id comes from the session,
+  never from the request body.
 - Both webhook routes use raw-body parsers and constant-time signature comparison.
 - Webhooks are acknowledged before processing so HubSpot never retries because of slow sync work.

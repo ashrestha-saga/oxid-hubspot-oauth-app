@@ -18,11 +18,21 @@ export interface HubspotInstallInput {
   name?: string | null;
 }
 
-export interface OxidPairingInput {
+export interface OxidOAuthCredentialsInput {
+  oxidBaseUrl: string;
+  clientId: string;
+  clientSecret: string;
+}
+
+export interface OxidOAuthCompleteInput {
   oxidShopId: string;
   oxidBaseUrl: string;
-  oxidApiKey: string;
-  oxidWebhookSecret: string;
+  clientId: string;
+  clientSecret: string;
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: Date;
+  webhookSecret: string;
 }
 
 export const integrationsRepo = {
@@ -42,19 +52,6 @@ export const integrationsRepo = {
     return prisma.integration.findMany({ where: { status: 'active' }, orderBy: { createdAt: 'asc' } });
   },
 
-  /** HubSpot OAuth done but no OXID shop attached yet (dev bypass target). */
-  listAwaitingOxidPairing(): Promise<IntegrationRow[]> {
-    return prisma.integration.findMany({
-      where: { oxidShopId: null, hubspotAccessToken: { not: null } },
-      orderBy: { createdAt: 'asc' },
-    });
-  },
-
-  /**
-   * Called at the end of the OAuth callback. Re-installing an already paired
-   * portal refreshes the tokens without knocking the integration out of
-   * 'active', so a merchant re-authorizing does not stop the sync.
-   */
   upsertFromHubspotInstall(input: HubspotInstallInput): Promise<IntegrationRow> {
     const tokens = {
       hubspotAccessToken: encrypt(input.accessToken),
@@ -91,31 +88,45 @@ export const integrationsRepo = {
     });
   },
 
-  /** Completes a pairing: stores the shop credentials and activates the tenant. */
-  attachOxidShop(id: string, input: OxidPairingInput): Promise<IntegrationRow> {
+  /** Persists shop URL + OAuth client creds before redirecting to OXID authorize. */
+  saveOxidOAuthCredentials(id: string, input: OxidOAuthCredentialsInput): Promise<IntegrationRow> {
+    return prisma.integration.update({
+      where: { id },
+      data: {
+        oxidBaseUrl: input.oxidBaseUrl,
+        oxidOAuthClientId: encrypt(input.clientId),
+        oxidOAuthClientSecret: encrypt(input.clientSecret),
+      },
+    });
+  },
+
+  /** Completes OXID OAuth: stores tokens, webhook secret, activates tenant. */
+  attachOxidFromOAuth(id: string, input: OxidOAuthCompleteInput): Promise<IntegrationRow> {
     return prisma.integration.update({
       where: { id },
       data: {
         oxidShopId: input.oxidShopId,
         oxidBaseUrl: input.oxidBaseUrl,
-        oxidApiKey: encrypt(input.oxidApiKey),
-        oxidWebhookSecret: encrypt(input.oxidWebhookSecret),
-        // A re-pair invalidates any cached bearer token minted from the old key.
-        oxidAccessToken: null,
-        oxidTokenExpiresAt: null,
+        oxidOAuthClientId: encrypt(input.clientId),
+        oxidOAuthClientSecret: encrypt(input.clientSecret),
+        oxidAccessToken: encrypt(input.accessToken),
+        oxidRefreshToken: encrypt(input.refreshToken),
+        oxidTokenExpiresAt: input.expiresAt,
+        oxidWebhookSecret: encrypt(input.webhookSecret),
         status: 'active',
       },
     });
   },
 
-  updateOxidToken(
+  updateOxidTokens(
     id: string,
-    input: { accessToken: string; expiresAt: Date },
+    input: { accessToken: string; refreshToken: string; expiresAt: Date },
   ): Promise<IntegrationRow> {
     return prisma.integration.update({
       where: { id },
       data: {
         oxidAccessToken: encrypt(input.accessToken),
+        oxidRefreshToken: encrypt(input.refreshToken),
         oxidTokenExpiresAt: input.expiresAt,
       },
     });
@@ -135,10 +146,34 @@ export const integrationsRepo = {
   setLastReconciledAt(id: string, at: Date): Promise<IntegrationRow> {
     return prisma.integration.update({ where: { id }, data: { lastReconciledAt: at } });
   },
-};
 
-// --- secret accessors -------------------------------------------------------
-// Decryption lives next to the repository so no caller ever handles ciphertext.
+  saveFieldMapping(
+    id: string,
+    input: {
+      fieldMappingJson: string;
+      mappingStatus: 'default' | 'custom';
+      samplePayloadJson?: string | null;
+    },
+  ): Promise<IntegrationRow> {
+    return prisma.integration.update({
+      where: { id },
+      data: {
+        fieldMappingJson: input.fieldMappingJson,
+        mappingStatus: input.mappingStatus,
+        ...(input.samplePayloadJson !== undefined
+          ? { samplePayloadJson: input.samplePayloadJson }
+          : {}),
+      },
+    });
+  },
+
+  saveSamplePayload(id: string, samplePayloadJson: string): Promise<IntegrationRow> {
+    return prisma.integration.update({
+      where: { id },
+      data: { samplePayloadJson },
+    });
+  },
+};
 
 export function hubspotAccessToken(row: IntegrationRow): string {
   if (!row.hubspotAccessToken) {
@@ -154,15 +189,29 @@ export function hubspotRefreshToken(row: IntegrationRow): string {
   return decrypt(row.hubspotRefreshToken);
 }
 
-export function oxidApiKey(row: IntegrationRow): string {
-  if (!row.oxidApiKey) {
-    throw new IntegrationNotReadyError(`integration ${row.id} is not paired with an OXID shop`);
+export function oxidOAuthClientId(row: IntegrationRow): string {
+  if (!row.oxidOAuthClientId) {
+    throw new IntegrationNotReadyError(`integration ${row.id} has no OXID OAuth client id`);
   }
-  return decrypt(row.oxidApiKey);
+  return decrypt(row.oxidOAuthClientId);
+}
+
+export function oxidOAuthClientSecret(row: IntegrationRow): string {
+  if (!row.oxidOAuthClientSecret) {
+    throw new IntegrationNotReadyError(`integration ${row.id} has no OXID OAuth client secret`);
+  }
+  return decrypt(row.oxidOAuthClientSecret);
 }
 
 export function oxidAccessToken(row: IntegrationRow): string | null {
   return row.oxidAccessToken ? decrypt(row.oxidAccessToken) : null;
+}
+
+export function oxidRefreshToken(row: IntegrationRow): string {
+  if (!row.oxidRefreshToken) {
+    throw new IntegrationNotReadyError(`integration ${row.id} is not connected to an OXID shop`);
+  }
+  return decrypt(row.oxidRefreshToken);
 }
 
 export function oxidWebhookSecret(row: IntegrationRow): string {
@@ -177,4 +226,8 @@ export function oxidBaseUrl(row: IntegrationRow): string {
     throw new IntegrationNotReadyError(`integration ${row.id} has no OXID base URL`);
   }
   return row.oxidBaseUrl.replace(/\/+$/, '');
+}
+
+export function isOxidOAuthConnected(row: IntegrationRow): boolean {
+  return row.status === 'active' && row.oxidRefreshToken !== null;
 }

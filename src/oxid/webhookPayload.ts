@@ -1,6 +1,11 @@
 import { z } from 'zod';
-import { fromOxidUserWebhook } from './fromOxidUserWebhook';
-import { fromOxid, type CanonicalContact } from '../sync/fieldMap';
+import { type CanonicalContact } from '../sync/fieldMap';
+import {
+  canonicalFromOxidCustomer,
+  canonicalFromOxidUser,
+  defaultTenantFieldMap,
+  type TenantFieldMap,
+} from '../sync/tenantFieldMap';
 import type { SourceRecord } from '../sync/syncContact';
 
 const webhookEventSchema = z.enum([
@@ -130,25 +135,31 @@ export function shopIdFrom(parsed: ParsedOxidWebhook): string | undefined {
 }
 
 /** Builds the sync job payload from any supported webhook format. */
-export function sourceRecordFromWebhook(parsed: ParsedOxidWebhook): SourceRecord {
+export function sourceRecordFromWebhook(
+  parsed: ParsedOxidWebhook,
+  map = defaultTenantFieldMap(),
+): SourceRecord {
   const event = webhookEventFrom(parsed);
 
   if (parsed.format === 'normalized') {
-    const fields: CanonicalContact = fromOxid(parsed.payload.customer as Record<string, unknown>);
+    const customer = parsed.payload.customer as Record<string, unknown>;
+    const fields: CanonicalContact = canonicalFromOxidCustomer(customer, map);
     return {
       id: parsed.payload.customer.id,
       fields,
+      rawOxid: customer,
       deleted: event === 'customer.deleted',
     };
   }
 
   const users =
     parsed.format === 'raw_users' ? parsed.payload.users : parsed.payload.users;
-  const mapped = fromOxidUserWebhook(users);
+  const mapped = canonicalFromOxidUser(users as Record<string, unknown>, map);
 
   return {
     id: mapped.id,
     fields: mapped.fields,
+    rawOxid: users as Record<string, unknown>,
     deleted: event === 'customer.deleted',
   };
 }

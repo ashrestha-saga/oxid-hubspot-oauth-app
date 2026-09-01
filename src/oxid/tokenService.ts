@@ -1,78 +1,41 @@
+import type { IntegrationRow } from '../db/repositories/integrations';
 import {
   integrationsRepo,
   oxidAccessToken,
-  oxidApiKey,
   oxidBaseUrl,
-  type IntegrationRow,
+  oxidOAuthClientId,
+  oxidOAuthClientSecret,
+  oxidRefreshToken,
 } from '../db/repositories/integrations';
-import { ExternalApiError, NotFoundError } from '../lib/errors';
+import { ExternalApiError, NotFoundError, AppError } from '../lib/errors';
 import { logger } from '../lib/logger';
+import { refreshOxidAccessToken } from './oauthApi';
 
 /** Re-mint this far before expiry so an in-flight call can't be caught out. */
 const EXPIRY_MARGIN_MS = 60 * 1000;
 
-/**
- * One in-flight mint per integration. OXID has no refresh token - the bearer is
- * re-derived from the stored API key - so a burst of jobs for the same shop
- * would otherwise all mint at once.
- */
+/** One in-flight refresh per integration. */
 const inFlight = new Map<string, Promise<string>>();
 
-interface TokenResponse {
-  access_token?: string;
-  accessToken?: string;
-  expires_in?: number;
-  expiresIn?: number;
-}
-
-async function mint(row: IntegrationRow): Promise<string> {
-  const response = await fetch(`${oxidBaseUrl(row)}/oxapi/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ apiKey: oxidApiKey(row), grantType: 'client_credentials' }),
+async function refresh(row: IntegrationRow): Promise<string> {
+  const tokens = await refreshOxidAccessToken(oxidBaseUrl(row), {
+    clientId: oxidOAuthClientId(row),
+    clientSecret: oxidOAuthClientSecret(row),
+    refreshToken: oxidRefreshToken(row),
   });
 
-  const text = await response.text();
-  if (!response.ok) {
-    throw new ExternalApiError('OXID token request failed', {
-      system: 'oxid',
-      status: response.status,
-      details: text.slice(0, 500),
-    });
-  }
-
-  let body: TokenResponse;
-  try {
-    body = JSON.parse(text) as TokenResponse;
-  } catch {
-    throw new ExternalApiError('OXID token response was not JSON', {
-      system: 'oxid',
-      status: response.status,
-      details: text.slice(0, 200),
-    });
-  }
-
-  const accessToken = body.access_token ?? body.accessToken;
-  const expiresIn = body.expires_in ?? body.expiresIn;
-  if (!accessToken || !expiresIn) {
-    throw new ExternalApiError('OXID token response missing access_token/expires_in', {
-      system: 'oxid',
-      status: response.status,
-    });
-  }
-
-  await integrationsRepo.updateOxidToken(row.id, {
-    accessToken,
-    expiresAt: new Date(Date.now() + expiresIn * 1000),
+  await integrationsRepo.updateOxidTokens(row.id, {
+    accessToken: tokens.accessToken,
+    refreshToken: tokens.refreshToken,
+    expiresAt: tokens.expiresAt,
   });
 
-  return accessToken;
+  return tokens.accessToken;
 }
 
 /**
- * Returns a usable OXID bearer token, minting a new one only when the cached one
- * is missing or about to expire. Call this at the top of every function that
- * talks to OXID - the mirror image of `getValidAccessTokenForHub`.
+ * Returns a usable OXID bearer token, refreshing only when the cached one
+ * is missing or about to expire. Mirror of `getValidAccessTokenForHub`.
  */
 export async function getValidOxidToken(integrationId: string): Promise<string> {
   const row = await integrationsRepo.findById(integrationId);
@@ -89,13 +52,22 @@ export async function getValidOxidToken(integrationId: string): Promise<string> 
   const existing = inFlight.get(row.id);
   if (existing) return existing;
 
-  logger.debug({ integrationId: row.id }, 'minting OXID bearer token');
-  const promise = mint(row).finally(() => inFlight.delete(row.id));
+  logger.debug({ integrationId: row.id }, 'refreshing OXID access token');
+  const promise = refresh(row)
+    .catch((error: unknown) => {
+      if (error instanceof AppError) throw error;
+      if (error instanceof ExternalApiError) throw error;
+      throw new ExternalApiError('OXID token refresh failed', {
+        system: 'oxid',
+        cause: error,
+      });
+    })
+    .finally(() => inFlight.delete(row.id));
   inFlight.set(row.id, promise);
   return promise;
 }
 
-/** Test seam: clears the in-flight mint map. */
+/** Test seam: clears the in-flight refresh map. */
 export function resetOxidTokenState(): void {
   inFlight.clear();
 }

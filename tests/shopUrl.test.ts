@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildPairingRedirectUrl, hubspotInstalledAppUrl, normalizeShopUrl, sameShopHost } from '../src/oxid/shopUrl';
+import { hubspotInstalledAppUrl, normalizeShopUrl } from '../src/oxid/shopUrl';
 
 describe('normalizeShopUrl', () => {
   it('keeps a clean base URL as is', () => {
@@ -44,35 +44,6 @@ describe('normalizeShopUrl', () => {
     expect(() => normalizeShopUrl('')).toThrow(/required/);
     expect(() => normalizeShopUrl('   ')).toThrow(/required/);
     expect(() => normalizeShopUrl('https://intranet')).toThrow(/qualified/);
-  });
-});
-
-describe('sameShopHost', () => {
-  it('compares hosts case-insensitively and ignores the path', () => {
-    expect(sameShopHost('https://Shop.Example.com/admin', 'https://shop.example.com')).toBe(true);
-  });
-
-  it('treats a different host or port as different', () => {
-    expect(sameShopHost('https://shop.example.com', 'https://evil.example.com')).toBe(false);
-    expect(sameShopHost('https://shop.example.com', 'https://shop.example.com:8443')).toBe(false);
-  });
-
-  it('is false for unparseable input', () => {
-    expect(sameShopHost('not a url', 'https://shop.example.com')).toBe(false);
-  });
-});
-
-describe('buildPairingRedirectUrl', () => {
-  it('points at the module admin controller and carries the token', () => {
-    const url = new URL(buildPairingRedirectUrl('https://shop.example.com', 'tok-123'));
-    expect(url.origin + url.pathname).toBe('https://shop.example.com/admin/index.php');
-    expect(url.searchParams.get('cl')).toBe('hubspot_connect');
-    expect(url.searchParams.get('pairing_token')).toBe('tok-123');
-  });
-
-  it('keeps a sub-directory installation in the path', () => {
-    const url = new URL(buildPairingRedirectUrl('https://example.com/shop', 'tok'));
-    expect(url.pathname).toBe('/shop/admin/index.php');
   });
 });
 

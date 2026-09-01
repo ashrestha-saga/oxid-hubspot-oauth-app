@@ -1,19 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { EntityMappingRow } from '../../src/db/repositories/entityMappings';
 import type { IntegrationRow } from '../../src/db/repositories/integrations';
-import type { PairingRequestRow } from '../../src/db/repositories/pairingRequests';
 import type { SyncEventInput } from '../../src/db/repositories/syncEvents';
 import type { EnqueueInput, SyncJobRow } from '../../src/db/repositories/syncJobs';
 import { encrypt } from '../../src/lib/crypto';
 import type { IntegrationStatus } from '../../src/types';
 
-/**
- * In-memory stand-in for the repository layer.
- *
- * Mirrors the real repositories closely enough to exercise the sync engine and
- * every route - including the tenant scoping, which is the whole point of
- * testing it - without needing a live Postgres.
- */
 export interface SyncEventRecord extends SyncEventInput {
   id: string;
   createdAt: Date;
@@ -24,7 +16,6 @@ const state = {
   mappings: [] as EntityMappingRow[],
   events: [] as SyncEventRecord[],
   jobs: [] as SyncJobRow[],
-  pairings: [] as PairingRequestRow[],
 };
 
 export function resetFakeDb(): void {
@@ -32,19 +23,20 @@ export function resetFakeDb(): void {
   state.mappings = [];
   state.events = [];
   state.jobs = [];
-  state.pairings = [];
 }
 
 export const fakeState = state;
-
-// --- fixtures ---------------------------------------------------------------
 
 export interface IntegrationFixture {
   portalId: string | number | bigint;
   status?: IntegrationStatus;
   oxidShopId?: string | null;
   oxidBaseUrl?: string | null;
-  oxidApiKey?: string | null;
+  oxidOAuthClientId?: string | null;
+  oxidOAuthClientSecret?: string | null;
+  oxidAccessToken?: string | null;
+  oxidRefreshToken?: string | null;
+  oxidTokenExpiresAt?: Date | null;
   oxidWebhookSecret?: string | null;
   hubspotAccessToken?: string | null;
   hubspotRefreshToken?: string | null;
@@ -52,10 +44,37 @@ export interface IntegrationFixture {
   lastReconciledAt?: Date | null;
 }
 
+function baseIntegrationRow(partial: Partial<IntegrationRow>): IntegrationRow {
+  const now = new Date();
+  return {
+    id: randomUUID(),
+    name: null,
+    hubspotPortalId: null,
+    hubspotAccessToken: null,
+    hubspotRefreshToken: null,
+    hubspotTokenExpiresAt: null,
+    oxidShopId: null,
+    oxidBaseUrl: null,
+    oxidOAuthClientId: null,
+    oxidOAuthClientSecret: null,
+    oxidAccessToken: null,
+    oxidRefreshToken: null,
+    oxidTokenExpiresAt: null,
+    oxidWebhookSecret: null,
+    fieldMappingJson: null,
+    samplePayloadJson: null,
+    mappingStatus: 'default',
+    status: 'pending',
+    lastReconciledAt: null,
+    createdAt: now,
+    updatedAt: now,
+    ...partial,
+  };
+}
+
 export function addIntegration(fixture: IntegrationFixture): IntegrationRow {
   const now = new Date();
-  const row: IntegrationRow = {
-    id: randomUUID(),
+  const row = baseIntegrationRow({
     name: `portal-${fixture.portalId}`,
     hubspotPortalId: BigInt(fixture.portalId),
     hubspotAccessToken: fixture.hubspotAccessToken
@@ -66,23 +85,33 @@ export function addIntegration(fixture: IntegrationFixture): IntegrationRow {
       : encrypt('test-refresh-token'),
     hubspotTokenExpiresAt:
       fixture.hubspotTokenExpiresAt ?? new Date(now.getTime() + 60 * 60 * 1000),
-    oxidShopId: fixture.oxidShopId ?? randomUUID(),
+    oxidShopId: fixture.oxidShopId === null ? null : (fixture.oxidShopId ?? randomUUID()),
     oxidBaseUrl: fixture.oxidBaseUrl ?? 'https://shop.example.com',
-    oxidApiKey: encrypt(fixture.oxidApiKey ?? 'shop-api-key'),
-    oxidAccessToken: null,
-    oxidTokenExpiresAt: null,
-    oxidWebhookSecret: encrypt(fixture.oxidWebhookSecret ?? 'shop-webhook-secret'),
+    oxidOAuthClientId:
+      fixture.oxidOAuthClientId === null
+        ? null
+        : encrypt(fixture.oxidOAuthClientId ?? 'shop-client-id'),
+    oxidOAuthClientSecret:
+      fixture.oxidOAuthClientSecret === null
+        ? null
+        : encrypt(fixture.oxidOAuthClientSecret ?? 'shop-client-secret'),
+    oxidAccessToken: fixture.oxidAccessToken ? encrypt(fixture.oxidAccessToken) : null,
+    oxidRefreshToken:
+      fixture.oxidRefreshToken === null
+        ? null
+        : encrypt(fixture.oxidRefreshToken ?? 'shop-refresh-token'),
+    oxidTokenExpiresAt: fixture.oxidTokenExpiresAt ?? new Date(now.getTime() + 3600 * 1000),
+    oxidWebhookSecret:
+      fixture.oxidWebhookSecret === null
+        ? null
+        : encrypt(fixture.oxidWebhookSecret ?? 'shop-webhook-secret'),
     status: fixture.status ?? 'active',
     lastReconciledAt: fixture.lastReconciledAt ?? null,
-    createdAt: now,
-    updatedAt: now,
-  };
+  });
 
   state.integrations.push(row);
   return row;
 }
-
-// --- repositories -----------------------------------------------------------
 
 export const fakeIntegrationsRepo = {
   async findById(id: string) {
@@ -97,11 +126,6 @@ export const fakeIntegrationsRepo = {
   },
   async listActive() {
     return state.integrations.filter((row) => row.status === 'active');
-  },
-  async listAwaitingOxidPairing() {
-    return state.integrations.filter(
-      (row) => row.oxidShopId === null && row.hubspotAccessToken !== null,
-    );
   },
   async upsertFromHubspotInstall(input: {
     portalId: string | number | bigint;
@@ -119,25 +143,14 @@ export const fakeIntegrationsRepo = {
       return existing;
     }
 
-    const now = new Date();
-    const row: IntegrationRow = {
-      id: randomUUID(),
+    const row = baseIntegrationRow({
       name: input.name ?? null,
       hubspotPortalId: BigInt(input.portalId),
       hubspotAccessToken: encrypt(input.accessToken),
       hubspotRefreshToken: encrypt(input.refreshToken),
       hubspotTokenExpiresAt: input.expiresAt,
-      oxidShopId: null,
-      oxidBaseUrl: null,
-      oxidApiKey: null,
-      oxidAccessToken: null,
-      oxidTokenExpiresAt: null,
-      oxidWebhookSecret: null,
       status: 'pending',
-      lastReconciledAt: null,
-      createdAt: now,
-      updatedAt: now,
-    };
+    });
     state.integrations.push(row);
     return row;
   },
@@ -152,33 +165,51 @@ export const fakeIntegrationsRepo = {
     row.hubspotTokenExpiresAt = input.expiresAt;
     return row;
   },
-  async attachOxidShop(
+  async saveOxidOAuthCredentials(
+    id: string,
+    input: { oxidBaseUrl: string; clientId: string; clientSecret: string },
+  ) {
+    const row = state.integrations.find((entry) => entry.id === id);
+    if (!row) throw new Error(`no integration ${id}`);
+    row.oxidBaseUrl = input.oxidBaseUrl;
+    row.oxidOAuthClientId = encrypt(input.clientId);
+    row.oxidOAuthClientSecret = encrypt(input.clientSecret);
+    return row;
+  },
+  async attachOxidFromOAuth(
     id: string,
     input: {
       oxidShopId: string;
       oxidBaseUrl: string;
-      oxidApiKey: string;
-      oxidWebhookSecret: string;
+      clientId: string;
+      clientSecret: string;
+      accessToken: string;
+      refreshToken: string;
+      expiresAt: Date;
+      webhookSecret: string;
     },
   ) {
     const row = state.integrations.find((entry) => entry.id === id);
     if (!row) throw new Error(`no integration ${id}`);
-    if (state.integrations.some((entry) => entry.id !== id && entry.oxidShopId === input.oxidShopId)) {
-      throw new Error('duplicate oxid_shop_id');
-    }
     row.oxidShopId = input.oxidShopId;
     row.oxidBaseUrl = input.oxidBaseUrl;
-    row.oxidApiKey = encrypt(input.oxidApiKey);
-    row.oxidWebhookSecret = encrypt(input.oxidWebhookSecret);
-    row.oxidAccessToken = null;
-    row.oxidTokenExpiresAt = null;
+    row.oxidOAuthClientId = encrypt(input.clientId);
+    row.oxidOAuthClientSecret = encrypt(input.clientSecret);
+    row.oxidAccessToken = encrypt(input.accessToken);
+    row.oxidRefreshToken = encrypt(input.refreshToken);
+    row.oxidTokenExpiresAt = input.expiresAt;
+    row.oxidWebhookSecret = encrypt(input.webhookSecret);
     row.status = 'active';
     return row;
   },
-  async updateOxidToken(id: string, input: { accessToken: string; expiresAt: Date }) {
+  async updateOxidTokens(
+    id: string,
+    input: { accessToken: string; refreshToken: string; expiresAt: Date },
+  ) {
     const row = state.integrations.find((entry) => entry.id === id);
     if (!row) throw new Error(`no integration ${id}`);
     row.oxidAccessToken = encrypt(input.accessToken);
+    row.oxidRefreshToken = encrypt(input.refreshToken);
     row.oxidTokenExpiresAt = input.expiresAt;
     return row;
   },
@@ -199,6 +230,29 @@ export const fakeIntegrationsRepo = {
     const row = state.integrations.find((entry) => entry.id === id);
     if (!row) throw new Error(`no integration ${id}`);
     row.lastReconciledAt = at;
+    return row;
+  },
+  async saveFieldMapping(
+    id: string,
+    input: {
+      fieldMappingJson: string;
+      mappingStatus: 'default' | 'custom';
+      samplePayloadJson?: string | null;
+    },
+  ) {
+    const row = state.integrations.find((entry) => entry.id === id);
+    if (!row) throw new Error(`no integration ${id}`);
+    row.fieldMappingJson = input.fieldMappingJson;
+    row.mappingStatus = input.mappingStatus;
+    if (input.samplePayloadJson !== undefined) {
+      row.samplePayloadJson = input.samplePayloadJson;
+    }
+    return row;
+  },
+  async saveSamplePayload(id: string, samplePayloadJson: string) {
+    const row = state.integrations.find((entry) => entry.id === id);
+    if (!row) throw new Error(`no integration ${id}`);
+    row.samplePayloadJson = samplePayloadJson;
     return row;
   },
 };
@@ -377,42 +431,5 @@ export const fakeSyncJobsRepo = {
   },
   async deleteCompletedBefore() {
     return 0;
-  },
-};
-
-export const fakePairingRequestsRepo = {
-  async create(input: {
-    token: string;
-    portalId: string | number | bigint;
-    oxidShopUrl: string;
-    expiresAt: Date;
-  }) {
-    const row: PairingRequestRow = {
-      id: randomUUID(),
-      token: input.token,
-      hubspotPortalId: BigInt(input.portalId),
-      oxidShopUrl: input.oxidShopUrl,
-      used: false,
-      expiresAt: input.expiresAt,
-      createdAt: new Date(),
-    };
-    state.pairings.push(row);
-    return row;
-  },
-  async findByToken(token: string) {
-    return state.pairings.find((row) => row.token === token) ?? null;
-  },
-  async consume(token: string, now = new Date()) {
-    const row = state.pairings.find(
-      (entry) => entry.token === token && !entry.used && entry.expiresAt > now,
-    );
-    if (!row) return null;
-    row.used = true;
-    return row;
-  },
-  async deleteExpired(now = new Date()) {
-    const before = state.pairings.length;
-    state.pairings = state.pairings.filter((row) => row.expiresAt >= now);
-    return before - state.pairings.length;
   },
 };

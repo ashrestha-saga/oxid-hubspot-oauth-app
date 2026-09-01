@@ -22,8 +22,8 @@ function sign(data: string): string {
 
 /**
  * Issues a stateless signed session. This is what proves that whoever calls
- * `/oxid/pair/start` actually completed the OAuth install for that portal, so a
- * caller can never mint a pairing token for someone else's portal.
+ * `/oxid/oauth/start` actually completed the HubSpot OAuth install for that portal, so a
+ * caller can never start OXID OAuth for someone else's portal.
  */
 export function signPairingSession(
   input: { integrationId: string; portalId: string },

@@ -1,9 +1,10 @@
 export interface ConnectPageProps {
-  state: 'no_session' | 'not_connected' | 'connected';
+  state: 'no_session' | 'not_connected';
   portalId?: string;
   shopUrl?: string | null;
   installUrl: string;
   hubspotAppUrl?: string;
+  oxidOAuthRedirectUri?: string;
 }
 
 function escapeHtml(value: string): string {
@@ -13,6 +14,10 @@ function escapeHtml(value: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function escapeAttr(value: string): string {
+  return escapeHtml(value);
 }
 
 const STYLES = `
@@ -29,28 +34,20 @@ const STYLES = `
   }
   h1 { margin: 0 0 6px; font-size: 20px; letter-spacing: -.01em; }
   p.sub { margin: 0 0 24px; color: #5b6472; }
-  label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 13px; }
+  label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 13px; margin-top: 16px; }
+  label:first-of-type { margin-top: 0; }
   input {
     width: 100%; padding: 11px 12px; font-size: 15px; border: 1px solid #d3d8e0;
     border-radius: 8px; background: #fff; color: inherit;
   }
   input:focus { outline: 2px solid #2f6feb; outline-offset: 1px; border-color: #2f6feb; }
   .hint { margin: 8px 0 20px; font-size: 13px; color: #6b7480; }
+  .hint code { font-size: 12px; word-break: break-all; }
   button {
     width: 100%; padding: 11px 16px; font-size: 15px; font-weight: 600; cursor: pointer;
-    border: 0; border-radius: 8px; background: #ff5c35; color: #fff;
+    border: 0; border-radius: 8px; background: #ff5c35; color: #fff; margin-top: 8px;
   }
   button:hover { background: #ec4a24; }
-  button:disabled { background: #c7ccd4; cursor: progress; }
-  .badge {
-    display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px;
-    font-size: 13px; font-weight: 600; background: #e7f6ec; color: #17603a;
-  }
-  .badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #17603a; }
-  .row { margin-top: 20px; font-size: 13px; color: #5b6472; word-break: break-all; }
-  .row dt { font-weight: 600; color: #1c2330; }
-  .row dd { margin: 2px 0 12px; }
-  .error { margin-top: 16px; padding: 10px 12px; border-radius: 8px; background: #fdecea; color: #8a1c13; font-size: 13px; display: none; }
   .back {
     margin-top: 24px; padding-top: 20px; border-top: 1px solid #e4e8ee; text-align: center;
   }
@@ -58,64 +55,14 @@ const STYLES = `
     color: #2f6feb; font-size: 14px; font-weight: 600; text-decoration: none;
   }
   .back a:hover { text-decoration: underline; }
-  button.secondary {
-    margin-top: 12px; background: transparent; color: #2f6feb; border: 1px solid #d3d8e0;
-  }
-  button.secondary:hover { background: #f0f4ff; }
   @media (prefers-color-scheme: dark) {
     body { background: #12161c; color: #e6e9ef; }
     .card { background: #1a1f27; box-shadow: none; border: 1px solid #2a313c; }
     input { background: #12161c; border-color: #333c48; }
-    p.sub, .hint, .row { color: #9aa4b2; }
-    .row dt { color: #e6e9ef; }
+    p.sub, .hint { color: #9aa4b2; }
     .back { border-top-color: #2a313c; }
     .back a { color: #7eb0ff; }
-    button.secondary { color: #7eb0ff; border-color: #333c48; }
-    button.secondary:hover { background: #1e2633; }
   }
-`;
-
-const SCRIPT = `
-  const form = document.getElementById('connect-form');
-  const button = document.getElementById('connect-button');
-  const errorBox = document.getElementById('error');
-  let poll;
-
-  form?.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    errorBox.style.display = 'none';
-    button.disabled = true;
-    button.textContent = 'Opening your OXID admin...';
-
-    try {
-      const response = await fetch('/oxid/pair/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ shopUrl: document.getElementById('shop-url').value }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.message || 'Could not start pairing');
-
-      window.open(data.redirectUrl, '_blank', 'noopener');
-      button.textContent = 'Waiting for confirmation in OXID...';
-
-      poll = setInterval(async () => {
-        const status = await fetch('/oxid/status', { credentials: 'same-origin' })
-          .then((r) => r.json())
-          .catch(() => null);
-        if (status?.connected) {
-          clearInterval(poll);
-          window.location.reload();
-        }
-      }, 3000);
-    } catch (error) {
-      errorBox.textContent = error.message;
-      errorBox.style.display = 'block';
-      button.disabled = false;
-      button.textContent = 'Connect OXID shop';
-    }
-  });
 `;
 
 function shell(body: string): string {
@@ -127,7 +74,7 @@ function shell(body: string): string {
 <title>Connect your OXID shop</title>
 <style>${STYLES}</style>
 </head>
-<body><main class="card">${body}</main><script>${SCRIPT}</script></body>
+<body><main class="card">${body}</main></body>
 </html>`;
 }
 
@@ -140,41 +87,31 @@ export function renderConnectPage(props: ConnectPageProps): string {
   if (props.state === 'no_session') {
     return shell(`
       <h1>Session expired</h1>
-      <p class="sub">Your pairing session has expired. Start again from HubSpot to reconnect.</p>
+      <p class="sub">Your session has expired. Start again from HubSpot to reconnect.</p>
       <a href="${escapeHtml(props.installUrl)}"><button type="button">Install / reconnect app</button></a>
     `);
   }
 
-  if (props.state === 'connected') {
-    return shell(`
-      <h1>OXID shop connected</h1>
-      <p class="sub">Contacts now sync in both directions.</p>
-      <span class="badge">Active</span>
-      <dl class="row">
-        <dt>HubSpot portal</dt><dd>${escapeHtml(props.portalId ?? 'unknown')}</dd>
-        <dt>OXID shop</dt><dd>${escapeHtml(props.shopUrl ?? 'unknown')}</dd>
-      </dl>
-      <form id="connect-form">
-        <label for="shop-url">Pair a different shop</label>
-        <input id="shop-url" name="shopUrl" placeholder="https://shop.example.com" required />
-        <p class="hint">Re-pairing replaces the current connection.</p>
-        <button id="connect-button" type="submit">Connect OXID shop</button>
-      </form>
-      <div class="error" id="error"></div>
-      ${backToHubSpotLink(props.hubspotAppUrl)}
-    `);
-  }
+  const shopValue = props.shopUrl ? escapeAttr(props.shopUrl) : '';
+  const redirectUri = props.oxidOAuthRedirectUri ?? '';
 
   return shell(`
     <h1>Connect your OXID shop</h1>
-    <p class="sub">HubSpot portal ${escapeHtml(props.portalId ?? 'unknown')} is installed. One step left.</p>
-    <form id="connect-form">
+    <p class="sub">HubSpot portal ${escapeHtml(props.portalId ?? 'unknown')} is installed. Authorize your OXID shop via OAuth, then continue to field mapping.</p>
+    <form method="POST" action="/oxid/oauth/start">
       <label for="shop-url">Your OXID shop URL</label>
-      <input id="shop-url" name="shopUrl" placeholder="https://shop.example.com" required autofocus />
-      <p class="hint">We open your shop admin so you can confirm the connection there. You stay logged in to OXID - no credentials are shared with us.</p>
-      <button id="connect-button" type="submit">Connect OXID shop</button>
+      <input id="shop-url" name="shopUrl" placeholder="https://shop.example.com" value="${shopValue}" required autofocus />
+
+      <label for="client-id">OAuth Client ID</label>
+      <input id="client-id" name="clientId" placeholder="mwv_a1b2c3d4e5f6" required autocomplete="off" />
+
+      <label for="client-secret">OAuth Client Secret</label>
+      <input id="client-secret" name="clientSecret" type="password" placeholder="From OXID Admin → OAuth 2.0 Clients" required autocomplete="off" />
+
+      <p class="hint">Create an OAuth client in OXID Admin (MWV API → OAuth 2.0 Clients) with redirect URI:<br /><code>${escapeHtml(redirectUri)}</code><br />Scopes: <code>profile address api</code>. PKCE must be enabled.</p>
+
+      <button type="submit">Authorize with OXID</button>
     </form>
-    <div class="error" id="error"></div>
     ${backToHubSpotLink(props.hubspotAppUrl)}
   `);
 }

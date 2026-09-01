@@ -3,11 +3,6 @@ import { BadRequestError } from '../lib/errors';
 
 /**
  * Turns whatever the merchant typed into the shop's base URL.
- *
- * Merchants paste all sorts of things ("shop.example.com",
- * "https://shop.example.com/admin/index.php?cl=..."), and this value is later
- * used to build both the pairing redirect and every OXID API call, so it is
- * normalized once here rather than patched up at each call site.
  */
 export function normalizeShopUrl(input: string): string {
   const trimmed = (input ?? '').trim();
@@ -36,22 +31,6 @@ export function normalizeShopUrl(input: string): string {
     .replace(/\/+$/, '');
 
   return `${url.origin}${path}`;
-}
-
-/** Guards against a pairing token being replayed against a different shop. */
-export function sameShopHost(a: string, b: string): boolean {
-  try {
-    return new URL(a).host.toLowerCase() === new URL(b).host.toLowerCase();
-  } catch {
-    return false;
-  }
-}
-
-export function buildPairingRedirectUrl(shopBaseUrl: string, token: string): string {
-  const url = new URL(`${shopBaseUrl}/admin/index.php`);
-  url.searchParams.set('cl', 'hubspot_connect');
-  url.searchParams.set('pairing_token', token);
-  return url.toString();
 }
 
 /** HubSpot "Connected apps" page for the portal that just installed this integration. */

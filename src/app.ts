@@ -3,18 +3,18 @@ import { prisma } from './db/prisma';
 import { syncJobsRepo } from './db/repositories/syncJobs';
 import { oauthRouter } from './hubspot/oauthRoutes';
 import { hubspotWebhookRouter } from './hubspot/webhookRoutes';
+import { settingsRouter } from './hubspot/settingsRoutes';
 import { asyncHandler } from './http/asyncHandler';
 import { errorHandler, notFoundHandler } from './http/errorMiddleware';
 import { rawBodyParser } from './http/rawBody';
-import { oxidPairingRouter } from './oxid/pairingRoutes';
+import { oxidConnectRouter } from './oxid/connectRoutes';
+import { oxidOAuthRouter } from './oxid/oauthRoutes';
+import { oxidMappingRouter } from './oxid/mappingRoutes';
 import { oxidWebhookRouter } from './oxid/webhookRoutes';
-import { devRouter } from './dev/devRoutes';
 
 export function createApp(): Express {
   const app = express();
 
-  // The webhook v3 signature covers the URI HubSpot called, so the original
-  // protocol and host have to survive the hosting proxy.
   app.set('trust proxy', 1);
   app.disable('x-powered-by');
 
@@ -27,16 +27,17 @@ export function createApp(): Express {
     }),
   );
 
-  // Webhooks first, with raw bodies: signature verification needs the exact
-  // bytes, so these must not reach a JSON parser.
   app.use('/webhooks/hubspot', rawBodyParser(), hubspotWebhookRouter);
   app.use('/webhooks/oxid', rawBodyParser(), oxidWebhookRouter);
+  app.use('/api/settings', rawBodyParser(), settingsRouter);
 
   app.use(express.json({ limit: '1mb' }));
+  app.use(express.urlencoded({ extended: false }));
 
   app.use('/oauth', oauthRouter);
-  app.use('/oxid', oxidPairingRouter);
-  app.use('/dev', devRouter);
+  app.use('/oxid', oxidConnectRouter);
+  app.use('/oxid/oauth', oxidOAuthRouter);
+  app.use('/oxid', oxidMappingRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

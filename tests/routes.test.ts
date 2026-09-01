@@ -376,9 +376,14 @@ describe('OAuth routes', () => {
   });
 });
 
-describe('Pairing flow', () => {
+describe('OXID OAuth flow', () => {
   it('serves the connect page only with a valid session', async () => {
-    const integration = addIntegration({ portalId: 700, status: 'pending' });
+    const integration = addIntegration({
+      portalId: 700,
+      status: 'pending',
+      oxidRefreshToken: null,
+      oxidShopId: null,
+    });
 
     const anonymous = await request(app).get('/oxid/connect');
     expect(anonymous.status).toBe(401);
@@ -389,162 +394,142 @@ describe('Pairing flow', () => {
 
     expect(authorized.status).toBe(200);
     expect(authorized.text).toContain('Connect your OXID shop');
+    expect(authorized.text).toContain('OAuth Client ID');
     expect(authorized.text).toContain(
       'https://app.hubspot.com/integrations-settings/700/installed/1234567',
     );
   });
 
-  it('refuses to start pairing without a session', async () => {
+  it('refuses to start OXID OAuth without a session', async () => {
     const response = await request(app)
-      .post('/oxid/pair/start')
-      .send({ shopUrl: 'https://shop.example.com' });
+      .post('/oxid/oauth/start')
+      .send({
+        shopUrl: 'https://shop.example.com',
+        clientId: 'mwv_client',
+        clientSecret: 'secret',
+      });
 
     expect(response.status).toBe(401);
-    expect(fakeState.pairings).toHaveLength(0);
   });
 
-  it('mints a single-use token and redirect URL for the session portal', async () => {
-    const integration = addIntegration({ portalId: 701, status: 'pending' });
+  it('redirects to OXID authorize with PKCE when starting OAuth', async () => {
+    const integration = addIntegration({
+      portalId: 701,
+      status: 'pending',
+      oxidRefreshToken: null,
+      oxidShopId: null,
+    });
 
     const response = await request(app)
-      .post('/oxid/pair/start')
+      .post('/oxid/oauth/start')
       .set('Cookie', sessionCookie(integration.id, '701'))
-      .send({ shopUrl: 'shop.example.com/admin/' });
+      .send({
+        shopUrl: 'shop.example.com/admin/',
+        clientId: 'mwv_client',
+        clientSecret: 'secret',
+      });
 
-    expect(response.status).toBe(200);
-    expect(response.body.shopUrl).toBe('https://shop.example.com');
+    expect(response.status).toBe(302);
+    const target = new URL(response.headers.location as string);
+    expect(target.searchParams.get('cl')).toBe('oauthauthorize');
+    expect(target.searchParams.get('response_type')).toBe('code');
+    expect(target.searchParams.get('client_id')).toBe('mwv_client');
+    expect(target.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(target.searchParams.get('code_challenge')).toBeTruthy();
+    expect(target.searchParams.get('state')).toBeTruthy();
 
-    const redirect = new URL(response.body.redirectUrl);
-    expect(redirect.searchParams.get('cl')).toBe('hubspot_connect');
-
-    expect(fakeState.pairings).toHaveLength(1);
-    expect(fakeState.pairings[0]).toMatchObject({
-      hubspotPortalId: 701n,
-      oxidShopUrl: 'https://shop.example.com',
-      used: false,
-    });
-    expect(redirect.searchParams.get('pairing_token')).toBe(fakeState.pairings[0]?.token);
+    const stored = fakeState.integrations.find((row) => row.id === integration.id);
+    expect(stored?.oxidBaseUrl).toBe('https://shop.example.com');
   });
 
   it('rejects a shop URL that is not https', async () => {
-    const integration = addIntegration({ portalId: 702, status: 'pending' });
+    const integration = addIntegration({
+      portalId: 702,
+      status: 'pending',
+      oxidRefreshToken: null,
+      oxidShopId: null,
+    });
 
     const response = await request(app)
-      .post('/oxid/pair/start')
+      .post('/oxid/oauth/start')
       .set('Cookie', sessionCookie(integration.id, '702'))
-      .send({ shopUrl: 'http://shop.example.com' });
+      .send({
+        shopUrl: 'http://shop.example.com',
+        clientId: 'mwv_client',
+        clientSecret: 'secret',
+      });
 
     expect(response.status).toBe(400);
   });
 
-  it('completes pairing, activates the tenant and returns the secret once', async () => {
+  it('completes OXID OAuth callback, activates tenant and redirects to mapping', async () => {
     const integration = addIntegration({
       portalId: 703,
       status: 'pending',
       oxidShopId: null,
+      oxidRefreshToken: null,
     });
-    integration.oxidShopId = null;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        const href = String(url);
+        if (href.includes('oauthtoken')) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () =>
+              JSON.stringify({
+                access_token: 'oxid-access',
+                refresh_token: 'oxid-refresh',
+                expires_in: 3600,
+              }),
+          } as Response;
+        }
+        if (href.includes('oauthme')) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () =>
+              JSON.stringify({
+                status: 'success',
+                data: { sub: 'cust-1', email: 'user@example.com' },
+              }),
+          } as Response;
+        }
+        return { ok: false, status: 404, text: async () => 'not found' } as Response;
+      }),
+    );
 
     const start = await request(app)
-      .post('/oxid/pair/start')
+      .post('/oxid/oauth/start')
       .set('Cookie', sessionCookie(integration.id, '703'))
-      .send({ shopUrl: 'https://shop.example.com' });
+      .send({
+        shopUrl: 'https://shop.example.com',
+        clientId: 'mwv_client',
+        clientSecret: 'secret',
+      });
 
-    const token = new URL(start.body.redirectUrl).searchParams.get('pairing_token') as string;
+    const state = new URL(start.headers.location as string).searchParams.get('state') as string;
 
-    const callback = await request(app).post('/oxid/pair/callback').send({
-      pairing_token: token,
-      shop_url: 'https://shop.example.com/admin',
-      api_key: 'shop-api-key-0123456789',
-    });
-
-    expect(callback.status).toBe(200);
-    expect(callback.body).toMatchObject({ status: 'ok', hubspot_portal_id: '703' });
-    expect(callback.body.webhook_secret).toMatch(/^[0-9a-f]{64}$/);
-    expect(callback.body.webhook_url).toBe(
-      `${BASE_URL}/webhooks/oxid/${callback.body.oxid_shop_id}`,
+    const callback = await request(app).get(
+      `/oxid/oauth/callback?code=auth-code&state=${encodeURIComponent(state)}`,
     );
+
+    expect(callback.status).toBe(302);
+    expect(callback.headers.location).toBe('/oxid/mapping');
 
     const stored = fakeState.integrations.find((row) => row.id === integration.id);
     expect(stored?.status).toBe('active');
     expect(stored?.oxidBaseUrl).toBe('https://shop.example.com');
-    expect(stored?.oxidApiKey).toMatch(/^v1:/);
-    expect(stored?.oxidWebhookSecret).not.toContain(callback.body.webhook_secret);
-
-    const status = await request(app)
-      .get('/oxid/status')
-      .set('Cookie', sessionCookie(integration.id, '703'));
-    expect(status.body).toMatchObject({ connected: true, status: 'active' });
+    expect(stored?.oxidRefreshToken).toMatch(/^v1:/);
+    expect(stored?.oxidWebhookSecret).toMatch(/^v1:/);
+    expect(stored?.oxidShopId).toBeTruthy();
   });
 
-  it('rejects an unknown token', async () => {
-    const response = await request(app).post('/oxid/pair/callback').send({
-      pairing_token: 'definitely-not-a-real-token',
-      shop_url: 'https://shop.example.com',
-      api_key: 'shop-api-key-0123456789',
-    });
-
+  it('rejects OXID OAuth callback with invalid state', async () => {
+    const response = await request(app).get('/oxid/oauth/callback?code=auth-code&state=bogus');
     expect(response.status).toBe(400);
-  });
-
-  it('rejects a reused token', async () => {
-    const integration = addIntegration({ portalId: 704, status: 'pending' });
-
-    const start = await request(app)
-      .post('/oxid/pair/start')
-      .set('Cookie', sessionCookie(integration.id, '704'))
-      .send({ shopUrl: 'https://shop.example.com' });
-    const token = new URL(start.body.redirectUrl).searchParams.get('pairing_token') as string;
-
-    const body = {
-      pairing_token: token,
-      shop_url: 'https://shop.example.com',
-      api_key: 'shop-api-key-0123456789',
-    };
-
-    expect((await request(app).post('/oxid/pair/callback').send(body)).status).toBe(200);
-    expect((await request(app).post('/oxid/pair/callback').send(body)).status).toBe(400);
-  });
-
-  it('rejects an expired token', async () => {
-    const integration = addIntegration({ portalId: 705, status: 'pending' });
-    const start = await request(app)
-      .post('/oxid/pair/start')
-      .set('Cookie', sessionCookie(integration.id, '705'))
-      .send({ shopUrl: 'https://shop.example.com' });
-
-    const token = new URL(start.body.redirectUrl).searchParams.get('pairing_token') as string;
-    const pairing = fakeState.pairings.find((row) => row.token === token);
-    if (pairing) pairing.expiresAt = new Date(Date.now() - 1000);
-
-    const response = await request(app).post('/oxid/pair/callback').send({
-      pairing_token: token,
-      shop_url: 'https://shop.example.com',
-      api_key: 'shop-api-key-0123456789',
-    });
-
-    expect(response.status).toBe(400);
-  });
-
-  it('refuses to bind a token to a different shop host', async () => {
-    const integration = addIntegration({ portalId: 706, status: 'pending' });
-    const start = await request(app)
-      .post('/oxid/pair/start')
-      .set('Cookie', sessionCookie(integration.id, '706'))
-      .send({ shopUrl: 'https://shop.example.com' });
-
-    const token = new URL(start.body.redirectUrl).searchParams.get('pairing_token') as string;
-
-    const response = await request(app).post('/oxid/pair/callback').send({
-      pairing_token: token,
-      shop_url: 'https://attacker.example.com',
-      api_key: 'shop-api-key-0123456789',
-    });
-
-    expect(response.status).toBe(400);
-    expect(
-      fakeState.integrations.find((row) => row.id === integration.id)?.status,
-    ).toBe('pending');
   });
 });
 

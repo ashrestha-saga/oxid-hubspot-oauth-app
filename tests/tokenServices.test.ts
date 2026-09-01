@@ -5,10 +5,16 @@ import { ExternalApiError } from '../src/lib/errors';
 import { addIntegration, fakeState, resetFakeDb } from './helpers/fakeDb';
 
 const refreshAccessToken = vi.hoisted(() => vi.fn());
+const refreshOxidAccessToken = vi.hoisted(() => vi.fn());
 
 vi.mock('../src/hubspot/oauthApi', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/hubspot/oauthApi')>();
   return { ...actual, refreshAccessToken };
+});
+
+vi.mock('../src/oxid/oauthApi', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/oxid/oauthApi')>();
+  return { ...actual, refreshOxidAccessToken };
 });
 
 const {
@@ -27,6 +33,13 @@ beforeEach(() => {
     accessToken: 'refreshed-access-token',
     refreshToken: 'refreshed-refresh-token',
     expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+  });
+  refreshOxidAccessToken.mockReset();
+  refreshOxidAccessToken.mockResolvedValue({
+    accessToken: 'refreshed-oxid-access',
+    refreshToken: 'refreshed-oxid-refresh',
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+    scope: 'profile address api',
   });
   vi.unstubAllGlobals();
 });
@@ -93,75 +106,40 @@ describe('HubSpot token service', () => {
 });
 
 describe('OXID token service', () => {
-  function stubTokenEndpoint(
-    response: { status?: number; body: unknown },
-    onCall?: () => void,
-  ): ReturnType<typeof vi.fn> {
-    const fetchMock = vi.fn(async () => {
-      onCall?.();
-      return {
-        ok: (response.status ?? 200) < 400,
-        status: response.status ?? 200,
-        text: async () => JSON.stringify(response.body),
-      } as unknown as Response;
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    return fetchMock;
-  }
-
-  it('mints a token from the stored API key and caches it', async () => {
-    const integration = addIntegration({ portalId: 1200 });
-    const fetchMock = stubTokenEndpoint({
-      body: { access_token: 'oxid-bearer', expires_in: 3600 },
+  it('returns the cached token while it is still fresh', async () => {
+    const integration = addIntegration({
+      portalId: 1200,
+      oxidAccessToken: 'still-good',
+      oxidTokenExpiresAt: new Date(Date.now() + 3600 * 1000),
     });
 
-    expect(await getValidOxidToken(integration.id)).toBe('oxid-bearer');
+    expect(await getValidOxidToken(integration.id)).toBe('still-good');
+    expect(refreshOxidAccessToken).not.toHaveBeenCalled();
+  });
 
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe('https://shop.example.com/oxapi/token');
-    expect(JSON.parse(init.body as string)).toEqual({
-      apiKey: 'shop-api-key',
-      grantType: 'client_credentials',
+  it('refreshes a token that expires within the safety margin', async () => {
+    const integration = addIntegration({
+      portalId: 1201,
+      oxidAccessToken: 'about-to-expire',
+      oxidTokenExpiresAt: new Date(Date.now() + 10 * 1000),
+    });
+
+    expect(await getValidOxidToken(integration.id)).toBe('refreshed-oxid-access');
+    expect(refreshOxidAccessToken).toHaveBeenCalledWith('https://shop.example.com', {
+      clientId: 'shop-client-id',
+      clientSecret: 'shop-client-secret',
+      refreshToken: 'shop-refresh-token',
     });
 
     const stored = fakeState.integrations.find((row) => row.id === integration.id);
-    expect(decrypt(stored?.oxidAccessToken as string)).toBe('oxid-bearer');
-    expect(stored?.oxidTokenExpiresAt?.getTime()).toBeGreaterThan(Date.now());
+    expect(decrypt(stored?.oxidAccessToken as string)).toBe('refreshed-oxid-access');
+    expect(decrypt(stored?.oxidRefreshToken as string)).toBe('refreshed-oxid-refresh');
   });
 
-  it('reuses the cached token instead of minting again', async () => {
-    const integration = addIntegration({ portalId: 1201 });
-    const fetchMock = stubTokenEndpoint({
-      body: { access_token: 'cached-bearer', expires_in: 3600 },
-    });
-
-    await getValidOxidToken(integration.id);
-    const second = await getValidOxidToken(integration.id);
-
-    expect(second).toBe('cached-bearer');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('re-mints once the cached token is inside the expiry margin', async () => {
-    const integration = addIntegration({ portalId: 1202 });
-    const fetchMock = stubTokenEndpoint({
-      body: { access_token: 'first-bearer', expires_in: 3600 },
-    });
-    await getValidOxidToken(integration.id);
-
-    const row = fakeState.integrations.find((entry) => entry.id === integration.id);
-    if (row) row.oxidTokenExpiresAt = new Date(Date.now() + 10 * 1000);
-
-    stubTokenEndpoint({ body: { access_token: 'second-bearer', expires_in: 3600 } });
-    expect(await getValidOxidToken(integration.id)).toBe('second-bearer');
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('mints only once when several calls race', async () => {
-    const integration = addIntegration({ portalId: 1203 });
-    let calls = 0;
-    stubTokenEndpoint({ body: { access_token: 'raced-bearer', expires_in: 3600 } }, () => {
-      calls += 1;
+  it('refreshes only once when several calls race', async () => {
+    const integration = addIntegration({
+      portalId: 1202,
+      oxidTokenExpiresAt: new Date(Date.now() - 1000),
     });
 
     const tokens = await Promise.all([
@@ -169,29 +147,30 @@ describe('OXID token service', () => {
       getValidOxidToken(integration.id),
     ]);
 
-    expect(tokens).toEqual(['raced-bearer', 'raced-bearer']);
-    expect(calls).toBe(1);
+    expect(tokens).toEqual(['refreshed-oxid-access', 'refreshed-oxid-access']);
+    expect(refreshOxidAccessToken).toHaveBeenCalledTimes(1);
   });
 
   it('surfaces a shop error as a retryable external error', async () => {
-    const integration = addIntegration({ portalId: 1204 });
-    stubTokenEndpoint({ status: 503, body: { error: 'maintenance' } });
+    const integration = addIntegration({
+      portalId: 1203,
+      oxidTokenExpiresAt: new Date(Date.now() - 1000),
+    });
+    refreshOxidAccessToken.mockRejectedValue(
+      new ExternalApiError('OXID token request failed', { system: 'oxid', status: 503 }),
+    );
 
     await expect(getValidOxidToken(integration.id)).rejects.toThrow(ExternalApiError);
   });
 
-  it('rejects a token response that is missing the fields we need', async () => {
-    const integration = addIntegration({ portalId: 1205 });
-    stubTokenEndpoint({ body: { token: 'wrong-shape' } });
+  it('refuses to refresh for a shop that was never OAuth connected', async () => {
+    const integration = addIntegration({
+      portalId: 1204,
+      oxidRefreshToken: null,
+      oxidAccessToken: null,
+      oxidTokenExpiresAt: null,
+    });
 
-    await expect(getValidOxidToken(integration.id)).rejects.toThrow(/missing access_token/);
-  });
-
-  it('refuses to mint for a shop that was never paired', async () => {
-    const integration = addIntegration({ portalId: 1206 });
-    const row = fakeState.integrations.find((entry) => entry.id === integration.id);
-    if (row) row.oxidApiKey = null;
-
-    await expect(getValidOxidToken(integration.id)).rejects.toThrow(/not paired/);
+    await expect(getValidOxidToken(integration.id)).rejects.toThrow(/not connected/);
   });
 });

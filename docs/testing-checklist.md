@@ -11,8 +11,8 @@ layer, the HubSpot CRM API and the OXID shop are all replaced by in-memory fakes
 | Guide checklist item | Where |
 | --- | --- |
 | Token refresh works when forced | `tests/tokenServices.test.ts` - refreshes inside the 5 minute margin, when already expired, persists the new pair encrypted, and collapses a race into a single refresh |
-| A reused or expired `pairing_token` is rejected | `tests/routes.test.ts` - "rejects a reused token", "rejects an expired token", plus "refuses to bind a token to a different shop host" |
-| OXID bearer token is cached and re-derived once expired | `tests/tokenServices.test.ts` - mint, cache hit, re-mint inside the margin, single mint under concurrency, error shapes |
+| OXID bearer token is cached and refreshed once expired | `tests/tokenServices.test.ts` - cache hit, refresh inside the margin, single refresh under concurrency |
+| OXID OAuth start/callback flow | `tests/routes.test.ts` - "OXID OAuth flow" block |
 | Creating a contact in HubSpot creates a customer in OXID with correct field mapping | `tests/syncContact.test.ts` - "HubSpot -> OXID" block |
 | Creating a customer in OXID creates a contact in HubSpot with correct field mapping | `tests/syncContact.test.ts` - "OXID -> HubSpot" block, including email matching against an existing contact |
 | Editing the same field on the synced side does not loop | `tests/syncContact.test.ts` - "suppresses the echo the destination system sends back" asserts `skipped_loop` *and* a write count that did not move |
@@ -23,7 +23,7 @@ layer, the HubSpot CRM API and the OXID shop are all replaced by in-memory fakes
 Also covered beyond the guide's list: AES-256-GCM round-trip and tamper detection
 (`tests/crypto.test.ts`), signature primitives for both systems (`tests/hmac.test.ts`), hash
 equivalence across the two systems (`tests/fieldMap.test.ts`), shop URL normalization
-(`tests/shopUrl.test.ts`), pairing session forgery and expiry (`tests/session.test.ts`), and queue
+(`tests/shopUrl.test.ts`), session cookie forgery and expiry (`tests/session.test.ts`), and queue
 retry/backoff behaviour (`tests/worker.test.ts`).
 
 ## Still manual - needs real accounts
@@ -62,21 +62,15 @@ update integrations set hubspot_token_expires_at = now() - interval '1 hour';
 Trigger any sync (or hit `/oxid/status`) and confirm from the logs that
 `refreshing HubSpot access token` appears once and the row's expiry moves forward.
 
-### 2. Self-serve pairing completes end-to-end
+### 2. OXID OAuth connect completes end-to-end
 
-Needs the OXID module from [oxid-module-contract.md](oxid-module-contract.md). Until it exists,
-simulate the module's half with `curl`:
+Requires MWV API OAuth enabled on the shop (see [API_DOCUMENTATION.md](../../API_DOCUMENTATION.md)).
 
-```bash
-# 1. In the browser, on /oxid/connect, enter the shop URL and click Connect.
-#    Copy the pairing_token out of the URL that opens.
-curl -sS -X POST "$BASE_URL/oxid/pair/callback" \
-  -H 'Content-Type: application/json' \
-  -d '{"pairing_token":"<token>","shop_url":"https://shop.example.com","api_key":"'$(openssl rand -hex 32)'"}'
-```
-
-Expect one `integrations` row with both sides populated and `status = 'active'`, and the connect page
-to flip to "OXID shop connected" on its next poll. Repeat the same call and expect `400`.
+1. Create an OAuth client with redirect URI `${BASE_URL}/oxid/oauth/callback`, scopes `profile address api`, PKCE required.
+2. Open `${BASE_URL}/oxid/connect` after HubSpot install.
+3. Enter shop URL, client id, and client secret. Complete login on the shop OAuth page.
+4. Expect redirect to `/oxid/mapping` and `status = 'active'` in the database with encrypted `oxid_refresh_token`.
+5. Copy webhook URL + secret from HubSpot Settings and configure the shop push module.
 
 ### 3. Webhook signature rejection against the running server
 

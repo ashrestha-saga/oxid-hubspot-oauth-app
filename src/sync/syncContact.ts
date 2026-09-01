@@ -12,21 +12,30 @@ import { oxidClientFor } from '../oxid/client';
 import { originOf, type SyncDirection, type SyncEventStatus, type SyncOrigin } from '../types';
 import {
   emailOf,
-  fromHubspot,
-  fromOxid,
-  hubspotReadProperties,
   normalizeContact,
-  toHubspotProperties,
-  toOxidInput,
   type CanonicalContact,
 } from './fieldMap';
 import { contactHash } from './hash';
+import {
+  canonicalFromHubspot,
+  canonicalFromOxidCustomer,
+  canonicalFromOxidUser,
+  hubspotPropertiesFromMap,
+  parseTenantFieldMap,
+  toHubspotPropertiesWithMap,
+  toOxidInputWithMap,
+} from './tenantFieldMap';
 
 export interface SourceRecord {
   /** Id in the originating system. */
   id: string;
   /** Mapped values, if the caller already has them. Omit to load from source. */
   fields?: CanonicalContact;
+  /**
+   * Raw OXID `users` (or customer) object so the worker can re-apply the
+   * tenant's current field map at sync time.
+   */
+  rawOxid?: Record<string, unknown>;
   /** Set for `customer.deleted` style events, which v1 does not propagate. */
   deleted?: boolean;
 }
@@ -62,18 +71,29 @@ async function hydrate(
   origin: SyncOrigin,
   record: SourceRecord,
 ): Promise<CanonicalContact | null> {
+  const map = parseTenantFieldMap(integration.fieldMappingJson);
+
+  // Prefer remapping from the raw OXID payload with the tenant's current map.
+  if (origin === 'oxid' && record.rawOxid) {
+    try {
+      return canonicalFromOxidUser(record.rawOxid, map).fields;
+    } catch {
+      // Fall through to pre-mapped fields / live fetch.
+    }
+  }
+
   if (record.fields) return normalizeContact(record.fields);
 
   if (origin === 'hubspot') {
     const contact = await hubspotClientFor(integration.id).getContact(
       record.id,
-      hubspotReadProperties,
+      hubspotPropertiesFromMap(map),
     );
-    return contact ? fromHubspot(contact) : null;
+    return contact ? canonicalFromHubspot(contact, map) : null;
   }
 
   const customer = await oxidClientFor(integration).getCustomer(record.id);
-  return customer ? fromOxid(customer) : null;
+  return customer ? canonicalFromOxidCustomer(customer, map) : null;
 }
 
 async function findOrCreateMapping(
@@ -113,7 +133,9 @@ async function writeToHubspot(
   email: string,
 ): Promise<string> {
   const client = hubspotClientFor(integration.id);
-  const properties = toHubspotProperties(contact);
+  const map = parseTenantFieldMap(integration.fieldMappingJson);
+  const properties = toHubspotPropertiesWithMap(contact, map);
+  const readProperties = hubspotPropertiesFromMap(map);
 
   if (mapping.hubspotContactId) {
     const existing = await client.getContact(mapping.hubspotContactId, ['email']);
@@ -132,7 +154,7 @@ async function writeToHubspot(
   const { contact: written } = await client.upsertContactByEmail(
     email,
     properties,
-    hubspotReadProperties,
+    readProperties,
   );
   return written.id;
 }
@@ -144,7 +166,8 @@ async function writeToOxid(
   email: string,
 ): Promise<string> {
   const client = oxidClientFor(integration);
-  const input = toOxidInput(contact);
+  const map = parseTenantFieldMap(integration.fieldMappingJson);
+  const input = toOxidInputWithMap(contact, map);
 
   if (mapping.oxidCustomerId) {
     const existing = await client.getCustomer(mapping.oxidCustomerId);

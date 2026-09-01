@@ -1,11 +1,10 @@
 import { Router } from 'express';
-import { integrationsRepo } from '../db/repositories/integrations';
+import { integrationsRepo, isOxidOAuthConnected } from '../db/repositories/integrations';
 import { BadRequestError } from '../lib/errors';
 import { logger } from '../lib/logger';
 import { setPairingCookie, signPairingSession } from '../lib/session';
 import { asyncHandler } from '../http/asyncHandler';
 import { buildAuthorizeUrl, exchangeCodeForTokens, getTokenInfo } from './oauthApi';
-import { applyDevOxidPairingIfNeeded } from '../dev/devBypass';
 
 export const oauthRouter = Router();
 
@@ -41,24 +40,25 @@ oauthRouter.get(
       name: info.hubDomain,
     });
 
-    const ready = await applyDevOxidPairingIfNeeded(integration);
-
     logger.info(
       {
-        integrationId: ready.id,
+        integrationId: integration.id,
         portalId: info.portalId,
-        status: ready.status,
-        devBypass: ready.oxidShopId !== integration.oxidShopId,
+        status: integration.status,
+        oxidConnected: isOxidOAuthConnected(integration),
       },
       'HubSpot install completed',
     );
 
-    // The merchant proved control of this portal by completing OAuth, so hand
-    // them a signed session that authorizes the OXID pairing step.
     setPairingCookie(
       res,
       signPairingSession({ integrationId: integration.id, portalId: info.portalId }),
     );
+
+    if (isOxidOAuthConnected(integration)) {
+      res.redirect('/oxid/mapping');
+      return;
+    }
 
     res.redirect('/oxid/connect');
   }),

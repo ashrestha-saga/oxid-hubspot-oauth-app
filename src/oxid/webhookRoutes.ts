@@ -6,6 +6,11 @@ import { logger } from '../lib/logger';
 import { asyncHandler } from '../http/asyncHandler';
 import { parseJsonBody, rawBodyOf } from '../http/rawBody';
 import { dedupeKeyFor } from '../sync/queue';
+import {
+  discoverOxidPayloadKeys,
+  parseTenantFieldMap,
+  suggestMapFromKeys,
+} from '../sync/tenantFieldMap';
 import { parseOxidWebhook, shopIdFrom, sourceRecordFromWebhook } from './webhookPayload';
 
 export const oxidWebhookRouter = Router();
@@ -64,7 +69,8 @@ oxidWebhookRouter.post(
       return;
     }
 
-    const sourceRecord = sourceRecordFromWebhook(parsed);
+    const map = parseTenantFieldMap(integration.fieldMappingJson);
+    const sourceRecord = sourceRecordFromWebhook(parsed, map);
 
     const { jobId, deduped } = await syncJobsRepo.enqueue({
       integrationId: integration.id,
@@ -79,5 +85,58 @@ oxidWebhookRouter.post(
     );
 
     res.status(202).json({ status: 'queued', jobId, deduped });
+  }),
+);
+
+/**
+ * Mapping-setup probe: same HMAC as the live webhook, but only stores the sample
+ * payload and returns discovered keys — never enqueues a sync job.
+ */
+oxidWebhookRouter.post(
+  '/:oxidShopId/probe',
+  asyncHandler(async (req, res) => {
+    const { oxidShopId } = req.params as { oxidShopId: string };
+
+    const integration = await integrationsRepo.findByOxidShopId(oxidShopId);
+    if (!integration || !integration.oxidWebhookSecret) {
+      res.status(404).json({ error: 'not_found', message: 'unknown oxidShopId' });
+      return;
+    }
+
+    const verification = verifyOxidSignature({
+      rawBody: rawBodyOf(req),
+      signature: req.get('x-oxid-signature'),
+      timestamp: req.get('x-oxid-timestamp'),
+      secret: oxidWebhookSecret(integration),
+    });
+
+    if (!verification.ok) {
+      res.status(401).json({ error: 'invalid_signature', message: verification.reason });
+      return;
+    }
+
+    const body = parseJsonBody(req);
+    if (!body || typeof body !== 'object') {
+      res.status(400).json({ error: 'bad_request', message: 'JSON body required' });
+      return;
+    }
+
+    const sampleJson = JSON.stringify(body);
+    await integrationsRepo.saveSamplePayload(integration.id, sampleJson);
+
+    const discovered = discoverOxidPayloadKeys(body);
+    const suggested = suggestMapFromKeys(discovered.keys);
+
+    logger.info(
+      { integrationId: integration.id, keyCount: discovered.keys.length },
+      'OXID probe sample stored',
+    );
+
+    res.status(200).json({
+      status: 'captured',
+      keys: discovered.keys,
+      suggestedMap: suggested,
+      sampleStored: true,
+    });
   }),
 );
