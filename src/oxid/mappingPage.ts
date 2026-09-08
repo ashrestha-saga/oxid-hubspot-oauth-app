@@ -169,6 +169,7 @@ const SCRIPT = `
 
   /** Always offered in the OXID dropdown (even if missing from the sample). */
   const STANDARD_OXID_PATHS = [
+    'oxid',
     'oxusername',
     'oxfname',
     'oxlname',
@@ -186,7 +187,7 @@ const SCRIPT = `
     'oxcountryid',
   ];
 
-  function oxidOptions(selected, { includeOxidId = false } = {}) {
+  function oxidOptions(selected) {
     const opts = ['<option value="">— unmapped —</option>'];
     const seen = new Set();
     const add = (path, sample) => {
@@ -198,39 +199,27 @@ const SCRIPT = `
         escape(label) + '</option>'
       );
     };
-    if (includeOxidId) add('oxid', null);
     for (const path of STANDARD_OXID_PATHS) add(path, null);
-    for (const key of state.keys) {
-      if (!includeOxidId && key.path === 'oxid') continue;
-      add(key.path, key.sample);
-    }
+    for (const key of state.keys) add(key.path, key.sample);
     if (selected && !seen.has(selected)) add(selected, '(saved)');
     return opts.join('');
-  }
-
-  function selectedOxidIdPath() {
-    const paths = state.map?.oxidIdPaths || [];
-    return paths.find((p) => p === 'oxid') || paths.find((p) => p !== 'oxusername' && p !== 'email') || 'oxid';
   }
 
   function renderMapEditor() {
     const root = document.getElementById('map-grid');
     if (!state.map) return;
-    const idPath = selectedOxidIdPath();
-    const idRow =
-      '<div class="map-row" data-id-row="1">' +
-        '<div class="canon">oxid (record id)</div>' +
-        '<div><label>OXID field</label><select class="oxid-id-path">' + oxidOptions(idPath, { includeOxidId: true }) + '</select></div>' +
-        '<div><label>HubSpot</label><p class="hint" style="margin:0">Not mapped to HubSpot. Stored for matching only.</p></div>' +
-      '</div>';
+    // Single oxid id UI: oxidId field (oxid ↔ ox_user_id). No separate "matching only" row.
     const fieldRows = state.map.fields.map((field, index) =>
       '<div class="map-row" data-index="' + index + '">' +
-        '<div class="canon">' + escape(field.canonical) + (field.canonical === 'email' ? ' *' : '') + '</div>' +
+        '<div class="canon">' +
+          escape(field.canonical === 'oxidId' ? 'oxidId (record id)' : field.canonical) +
+          (field.canonical === 'email' ? ' *' : '') +
+        '</div>' +
         '<div><label>OXID field</label><select class="oxid-path">' + oxidOptions(field.oxidPath) + '</select></div>' +
         '<div><label>HubSpot property</label><select class="hs-prop">' + propertyOptions(field.hubspotProperty) + '</select></div>' +
       '</div>'
     ).join('');
-    root.innerHTML = idRow + fieldRows;
+    root.innerHTML = fieldRows;
   }
 
   function readMapFromEditor() {
@@ -244,8 +233,8 @@ const SCRIPT = `
       }
       return { ...base, oxidPath, hubspotProperty };
     });
-    const idSelect = document.querySelector('.oxid-id-path');
-    const extraId = idSelect && idSelect.value ? idSelect.value : 'oxid';
+    const oxidIdField = fields.find((field) => field.canonical === 'oxidId');
+    const extraId = oxidIdField?.oxidPath || 'oxid';
     const oxidIdPaths = ['oxusername'];
     if (extraId && extraId !== 'oxusername' && extraId !== 'email') {
       oxidIdPaths.push(extraId);
