@@ -7,25 +7,21 @@ import { logger } from '../lib/logger';
 import { asyncHandler } from '../http/asyncHandler';
 import { parseJsonBody, publicUrlOf, rawBodyOf } from '../http/rawBody';
 import { dedupeKeyFor } from '../sync/queue';
-
-interface HubspotWebhookEvent {
-  eventId?: number;
-  subscriptionType?: string;
-  portalId?: number;
-  objectId?: number | string;
-  propertyName?: string;
-  occurredAt?: number;
-  changeSource?: string;
-}
+import {
+  contactIdFromHubspotEvent,
+  portalIdFromHubspotEvent,
+  shouldQueueHubspotContactEvent,
+  type HubspotWebhookEvent,
+} from './webhookPayload';
 
 export const hubspotWebhookRouter = Router();
 
 /**
- * Receives contact change events.
+ * Receives HubSpot contact webhook events (object.creation, object.propertyChange).
  *
- * Verifies, enqueues and returns - nothing is synced inline. HubSpot retries
- * deliveries that are slow or non-2xx, so doing the sync here would turn one
- * downstream hiccup into a storm of duplicate work.
+ * Verifies signature v3, filters to watched contact properties, enqueues
+ * hubspot_to_oxid jobs. The worker fetches the full contact from HubSpot CRM
+ * and writes to OXID using the saved OAuth tokens for that portal.
  */
 hubspotWebhookRouter.post(
   '/',
@@ -56,42 +52,55 @@ hubspotWebhookRouter.post(
     const integrationCache = new Map<string, string | null>();
 
     for (const event of events) {
-      if (event.portalId === undefined || event.objectId === undefined) {
+      const portalId = portalIdFromHubspotEvent(event);
+      const contactId = contactIdFromHubspotEvent(event);
+
+      if (!portalId || !contactId) {
         ignored += 1;
         continue;
       }
 
-      const portalKey = String(event.portalId);
-      if (!integrationCache.has(portalKey)) {
-        const integration = await integrationsRepo.findByPortalId(portalKey);
+      if (!shouldQueueHubspotContactEvent(event)) {
+        ignored += 1;
+        continue;
+      }
+
+      if (!integrationCache.has(portalId)) {
+        const integration = await integrationsRepo.findByPortalId(portalId);
         integrationCache.set(
-          portalKey,
+          portalId,
           integration && integration.status === 'active' ? integration.id : null,
         );
       }
 
-      const integrationId = integrationCache.get(portalKey) ?? null;
+      const integrationId = integrationCache.get(portalId) ?? null;
       if (!integrationId) {
         ignored += 1;
         continue;
       }
 
-      const contactId = String(event.objectId);
-      // Only the id is queued: HubSpot sends one event per changed property, so
-      // the worker reads the full contact when it processes the job.
       await syncJobsRepo.enqueue({
         integrationId,
         direction: 'hubspot_to_oxid',
         dedupeKey: dedupeKeyFor('hubspot_to_oxid', contactId),
-        payload: { id: contactId },
+        payload: {
+          id: contactId,
+          hubspotEvent: {
+            subscriptionType: event.subscriptionType,
+            propertyName: event.propertyName,
+            objectTypeId: event.objectTypeId,
+            eventId: event.eventId,
+          },
+        },
       });
       queued += 1;
     }
 
-    logger.debug({ received: events.length, queued, ignored }, 'HubSpot webhook processed');
+    logger.info(
+      { received: events.length, queued, ignored },
+      'HubSpot contact webhook processed',
+    );
 
-    // Unknown or inactive portals are acknowledged, not retried: a redelivery
-    // would fail the same way.
     res.status(200).json({ received: events.length, queued, ignored });
   }),
 );

@@ -137,9 +137,10 @@ describe('HubSpot v3 signature', () => {
 describe('OXID webhook signature', () => {
   const SECRET = 'shop-webhook-secret';
   const PAYLOAD = '{"event":"customer.updated","customer":{"id":"c-1"}}';
+  const nowSec = () => Math.floor(Date.now() / 1000);
 
-  it('accepts a correctly signed request', () => {
-    const timestamp = String(Date.now());
+  it('accepts a correctly signed request with sha256= prefix', () => {
+    const timestamp = String(nowSec());
 
     expect(
       verifyOxidSignature({
@@ -151,13 +152,28 @@ describe('OXID webhook signature', () => {
     ).toEqual({ ok: true });
   });
 
-  it('produces the documented sha256=<hex> shape', () => {
-    const signature = oxidSignatureFor(PAYLOAD, '1700000000000', SECRET);
-    expect(signature).toMatch(/^sha256=[0-9a-f]{64}$/);
+  it('accepts a bare base64 signature without the sha256= prefix', () => {
+    const timestamp = String(nowSec());
+    const digest = oxidSignatureFor(PAYLOAD, timestamp, SECRET).slice('sha256='.length);
+
+    expect(
+      verifyOxidSignature({
+        rawBody: PAYLOAD,
+        signature: digest,
+        timestamp,
+        secret: SECRET,
+      }),
+    ).toEqual({ ok: true });
+  });
+
+  it('produces the MWV sha256=<base64> header shape', () => {
+    const signature = oxidSignatureFor(PAYLOAD, '1725704400', SECRET);
+    expect(signature).toMatch(/^sha256=[A-Za-z0-9+/=]+$/);
+    expect(Buffer.from(signature.slice('sha256='.length), 'base64').length).toBe(32);
   });
 
   it('rejects a tampered body', () => {
-    const timestamp = String(Date.now());
+    const timestamp = String(nowSec());
     const signature = oxidSignatureFor(PAYLOAD, timestamp, SECRET);
 
     expect(
@@ -171,7 +187,7 @@ describe('OXID webhook signature', () => {
   });
 
   it("rejects another tenant's secret", () => {
-    const timestamp = String(Date.now());
+    const timestamp = String(nowSec());
 
     expect(
       verifyOxidSignature({
@@ -184,7 +200,7 @@ describe('OXID webhook signature', () => {
   });
 
   it('rejects a stale timestamp even when the signature matches it', () => {
-    const stale = String(Date.now() - 10 * 60 * 1000);
+    const stale = String(nowSec() - 10 * 60);
 
     expect(
       verifyOxidSignature({

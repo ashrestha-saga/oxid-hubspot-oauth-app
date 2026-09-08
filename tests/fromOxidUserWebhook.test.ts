@@ -5,6 +5,7 @@ import {
   formatOxidStreet,
   fromOxidUserWebhook,
   oxidUserRecordId,
+  pickNeedfulOxidUser,
   pickOxidField,
   type OxidRawUserRecord,
 } from '../src/oxid/fromOxidUserWebhook';
@@ -22,12 +23,13 @@ describe('fromOxidUserWebhook', () => {
     const result = fromOxidUserWebhook(fixture.users);
 
     expect(result).toEqual({
-      id: '66666692',
+      id: 'j.smith02@merzljak.de',
       updatedAt: '2026-07-31T17:28:36+02:00',
       fields: {
         email: 'j.smith02@merzljak.de',
         firstName: 'Jane02',
         lastName: 'Smith02',
+        salutation: null,
         phone: '+493012345678',
         company: 'MWV',
         address: 'In der Raste 14',
@@ -38,19 +40,111 @@ describe('fromOxidUserWebhook', () => {
     });
   });
 
-  it('prefers oxid over mcustnr as the record id', () => {
-    expect(
-      oxidUserRecordId({ oxid: 'internal-oxid-id', mcustnr: '66666692' }),
-    ).toBe('internal-oxid-id');
+  it('maps nested salutation/country objects and oxaddress fallbacks', () => {
+    const result = fromOxidUserWebhook({
+      oxid: '0400f18a7c9695af0e330bde325abdd6',
+      oxusername: 'r.victor01@merzljak.de',
+      oxfname: 'John',
+      oxlname: 'ADM01',
+      oxsal: 'MRS',
+      salutation: { id: 'MRS', title: 'Frau', title_1: 'Mrs' },
+      oxstreet: 'In der Raste',
+      oxstreetnr: '14',
+      oxzip: '53129',
+      oxcity: 'Bonn',
+      oxcountry: {
+        oxid: 'a7c40f631fc920687.20179984',
+        oxtitle: 'Deutschland',
+        oxtitle_1: 'Germany',
+        oxisoalpha2: 'DE',
+      },
+      oxaddress: [
+        {
+          oxfon: '0228-1234',
+          oxcompany: 'Company AG',
+        },
+      ],
+    });
+
+    expect(result.fields).toMatchObject({
+      email: 'r.victor01@merzljak.de',
+      firstName: 'John',
+      lastName: 'ADM01',
+      salutation: 'Mrs',
+      country: 'Deutschland',
+      address: 'In der Raste 14',
+      phone: '02281234',
+      company: 'Company AG',
+    });
+    expect(result.fields).not.toHaveProperty('oxidId');
   });
 
-  it('uses mcustnr when oxid is absent', () => {
-    expect(oxidUserRecordId({ mcustnr: 66666692 })).toBe('66666692');
+  it('maps oxsal and prefers oxcountry name over oxcountryid', () => {
+    const result = fromOxidUserWebhook({
+      oxid: 'c1eec0d427dee923affddeb9c391f670',
+      oxusername: 'hi32@gmail.com',
+      oxfname: 'hellisho',
+      oxlname: 'okays',
+      oxsal: 'MR',
+      oxcountry: 'Deutschland',
+      oxcountryid: 'a7c40f631fc920687.20179984',
+    });
+
+    expect(result.fields).toMatchObject({
+      email: 'hi32@gmail.com',
+      firstName: 'hellisho',
+      lastName: 'okays',
+      salutation: 'MR',
+      country: 'Deutschland',
+    });
+  });
+
+  it('keeps only needful keys from a full shop webhook row', () => {
+    const picked = pickNeedfulOxidUser({
+      oxid: 'abc',
+      oxusername: 'hi32@gmail.com',
+      oxfname: 'hellisho',
+      oxlname: 'okays',
+      oxsal: 'MR',
+      oxrights: 'user',
+      oxboni: '1000',
+      oxpoints: '0',
+      oxwronglogins: '0',
+      oxstreet: 'Hirschberger',
+      oxcountry: 'Deutschland',
+      deliveryAddress: [],
+    });
+
+    expect(picked).toEqual({
+      oxid: 'abc',
+      oxusername: 'hi32@gmail.com',
+      oxfname: 'hellisho',
+      oxlname: 'okays',
+      oxsal: 'MR',
+      oxstreet: 'Hirschberger',
+      oxcountry: 'Deutschland',
+      deliveryAddress: [],
+    });
+    expect(picked).not.toHaveProperty('oxrights');
+    expect(picked).not.toHaveProperty('oxboni');
+  });
+
+  it('uses normalized email as the record id, ignoring mcustnr and oxid', () => {
+    expect(
+      oxidUserRecordId({
+        oxid: 'internal-oxid-id',
+        mcustnr: '66666692',
+        oxusername: 'User@Example.com',
+      }),
+    ).toBe('user@example.com');
+  });
+
+  it('returns null when oxusername is missing', () => {
+    expect(oxidUserRecordId({ mcustnr: 66666692 })).toBeNull();
   });
 
   it('picks phone from the user row before child delivery addresses', () => {
     const result = fromOxidUserWebhook({
-      mcustnr: '1',
       oxusername: 'a@b.de',
       oxfon: '+49 111',
       child_ids: [{ oxfon: '+49 222' }],
@@ -65,7 +159,6 @@ describe('fromOxidUserWebhook', () => {
     );
 
     const user: OxidRawUserRecord = {
-      mcustnr: '9',
       oxusername: 'a@b.de',
       oxstreet: 'Main',
       oxstreetnr: '1',
@@ -85,7 +178,6 @@ describe('fromOxidUserWebhook', () => {
 
   it('falls back to the first child oxfon when the user has no phone', () => {
     const result = fromOxidUserWebhook({
-      mcustnr: '2',
       oxusername: 'a@b.de',
       child_ids: [{ oxfon: '' }, { oxfon: '+49 40 98765432' }],
     });
@@ -95,7 +187,6 @@ describe('fromOxidUserWebhook', () => {
 
   it('prefers oxtimestamp over oxcreate for updatedAt', () => {
     const result = fromOxidUserWebhook({
-      mcustnr: '3',
       oxusername: 'a@b.de',
       oxcreate: '2026-01-01T00:00:00Z',
       oxtimestamp: '2026-02-01T00:00:00Z',
@@ -104,10 +195,8 @@ describe('fromOxidUserWebhook', () => {
     expect(result.updatedAt).toBe('2026-02-01T00:00:00Z');
   });
 
-  it('throws when neither oxid nor mcustnr is present', () => {
-    expect(() =>
-      fromOxidUserWebhook({ oxusername: 'orphan@example.com' }),
-    ).toThrow(/no oxid or mcustnr/);
+  it('throws when oxusername is missing', () => {
+    expect(() => fromOxidUserWebhook({ mcustnr: '1' })).toThrow(/no email \(oxusername\)/);
   });
 });
 
@@ -117,7 +206,7 @@ describe('parseOxidWebhook + sourceRecordFromWebhook', () => {
     expect(parsed?.format).toBe('bare_users');
 
     const record = sourceRecordFromWebhook(parsed!);
-    expect(record.id).toBe('66666692');
+    expect(record.id).toBe('j.smith02@merzljak.de');
     expect(record.fields.email).toBe('j.smith02@merzljak.de');
     expect(record.deleted).toBe(false);
   });
@@ -130,10 +219,22 @@ describe('parseOxidWebhook + sourceRecordFromWebhook', () => {
     });
 
     expect(parsed?.format).toBe('raw_users');
-    expect(sourceRecordFromWebhook(parsed!).id).toBe('66666692');
+    expect(sourceRecordFromWebhook(parsed!).id).toBe('j.smith02@merzljak.de');
   });
 
-  it('still accepts the normalized customer contract', () => {
+  it('accepts users with email only (no mcustnr)', () => {
+    const parsed = parseOxidWebhook({
+      users: { oxusername: 'only-email@example.com', oxfname: 'Only' },
+    });
+
+    expect(parsed?.format).toBe('bare_users');
+    expect(sourceRecordFromWebhook(parsed!)).toMatchObject({
+      id: 'only-email@example.com',
+      fields: { email: 'only-email@example.com', firstName: 'Only' },
+    });
+  });
+
+  it('still accepts the normalized customer contract keyed by email', () => {
     const parsed = parseOxidWebhook({
       event: 'customer.updated',
       customer: {
@@ -147,7 +248,7 @@ describe('parseOxidWebhook + sourceRecordFromWebhook', () => {
 
     expect(parsed?.format).toBe('normalized');
     expect(sourceRecordFromWebhook(parsed!)).toMatchObject({
-      id: 'oxid-1',
+      id: 'norm@example.com',
       fields: {
         email: 'norm@example.com',
         firstName: 'Norm',
@@ -158,7 +259,7 @@ describe('parseOxidWebhook + sourceRecordFromWebhook', () => {
   });
 
   it('returns null for unrelated payloads', () => {
-    expect(parseOxidWebhook({ customer: { email: 'x@y.de' } })).toBeNull();
-    expect(parseOxidWebhook({ users: { oxusername: 'no-id@example.com' } })).toBeNull();
+    expect(parseOxidWebhook({ customer: { firstName: 'NoEmail' } })).toBeNull();
+    expect(parseOxidWebhook({ users: { oxfname: 'no-email' } })).toBeNull();
   });
 });

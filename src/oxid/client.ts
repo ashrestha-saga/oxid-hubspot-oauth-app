@@ -1,5 +1,7 @@
 import { env } from '../config/env';
 import type { IntegrationRow } from '../db/repositories/integrations';
+import type { CanonicalContact } from '../sync/fieldMap';
+import type { TenantFieldMap } from '../sync/tenantFieldMap';
 import { StubOxidClient } from './adapters/stubOxidClient';
 import { OxapiClient } from './adapters/oxapiClient';
 
@@ -29,6 +31,13 @@ export interface OxidCustomerInput {
  */
 export interface OxidClient {
   readonly mode: 'stub' | 'oxapi';
+  /** HubSpot → OXID: update by email (`oxusername`), insert when missing. */
+  upsertCustomerByEmail(
+    email: string,
+    contact: CanonicalContact,
+    map: TenantFieldMap,
+    options?: { oxidRecordId?: string | null },
+  ): Promise<OxidCustomer>;
   findCustomerByEmail(email: string): Promise<OxidCustomer | null>;
   getCustomer(id: string): Promise<OxidCustomer | null>;
   createCustomer(input: OxidCustomerInput): Promise<OxidCustomer>;

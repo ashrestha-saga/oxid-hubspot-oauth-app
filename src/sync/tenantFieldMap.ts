@@ -10,8 +10,11 @@ import {
 import type { HubspotContact, HubspotProperties } from '../hubspot/client';
 import type { OxidCustomer, OxidCustomerInput } from '../oxid/client';
 import {
+  formatOxidCountry,
+  formatOxidSalutation,
   formatOxidStreet,
   oxidUserRecordId,
+  pickNeedfulOxidUser,
   pickOxidField,
   type OxidRawUserRecord,
 } from '../oxid/fromOxidUserWebhook';
@@ -22,15 +25,19 @@ export interface FieldBinding {
   canonical: CanonicalField;
   /** Dot path into the OXID user/customer object. Null = leave unmapped. */
   oxidPath: string | null;
-  hubspotProperty: string;
+  /** HubSpot contact property. Null = leave unmapped (do not write to HubSpot). */
+  hubspotProperty: string | null;
   transform: FieldTransform;
 }
 
 export interface TenantFieldMap {
   version: 1;
   /**
-   * Paths tried in order to resolve the OXID record id (on the users/customer object).
-   * Example: ["oxid", "mcustnr"]
+   * Paths tried in order to resolve the OXID record key (normalized email).
+   * `oxusername` / `email` are used as the sync key today.
+   * `oxid` may be listed for mapping/discovery but is not used as the sync key
+   * or sent on User API writes yet (see resolveOxidRecordId / buildOxidUserRecord).
+   * Example: ["oxusername", "oxid"]
    */
   oxidIdPaths: string[];
   fields: FieldBinding[];
@@ -48,15 +55,17 @@ const fieldBindingSchema = z.object({
     'email',
     'firstName',
     'lastName',
+    'salutation',
     'phone',
     'company',
     'address',
     'city',
     'zip',
     'country',
+    'oxidId',
   ]),
   oxidPath: z.string().min(1).nullable(),
-  hubspotProperty: z.string().min(1),
+  hubspotProperty: z.string().min(1).nullable(),
   transform: z.enum(['none', 'oxid_street', 'oxid_pick_with_children']).default('none'),
 });
 
@@ -70,7 +79,7 @@ export const tenantFieldMapSchema = z.object({
 export function defaultTenantFieldMap(): TenantFieldMap {
   return {
     version: 1,
-    oxidIdPaths: ['oxid', 'mcustnr'],
+    oxidIdPaths: ['oxusername', 'oxid'],
     fields: contactFieldMap.map((field) => {
       const oxidPath =
         field.canonical === 'email'
@@ -79,19 +88,23 @@ export function defaultTenantFieldMap(): TenantFieldMap {
             ? 'oxfname'
             : field.canonical === 'lastName'
               ? 'oxlname'
-              : field.canonical === 'phone'
-                ? 'oxfon'
-                : field.canonical === 'company'
-                  ? 'oxcompany'
-                  : field.canonical === 'address'
-                    ? 'oxstreet'
-                    : field.canonical === 'city'
-                      ? 'oxcity'
-                      : field.canonical === 'zip'
-                        ? 'oxzip'
-                      : field.canonical === 'country'
-                          ? 'oxcountryid'
-                          : 'email';
+              : field.canonical === 'salutation'
+                ? 'oxsal'
+                : field.canonical === 'oxidId'
+                  ? null
+                  : field.canonical === 'phone'
+                    ? 'oxfon'
+                    : field.canonical === 'company'
+                      ? 'oxcompany'
+                      : field.canonical === 'address'
+                        ? 'oxstreet'
+                        : field.canonical === 'city'
+                          ? 'oxcity'
+                          : field.canonical === 'zip'
+                            ? 'oxzip'
+                            : field.canonical === 'country'
+                              ? 'oxcountry'
+                              : null;
 
       const transform: FieldTransform =
         field.canonical === 'address'
@@ -107,7 +120,8 @@ export function defaultTenantFieldMap(): TenantFieldMap {
       return {
         canonical: field.canonical,
         oxidPath,
-        hubspotProperty: field.hubspot,
+        // oxidId stays fully unmapped until the user picks both sides explicitly.
+        hubspotProperty: field.canonical === 'oxidId' ? null : field.hubspot,
         transform,
       };
     }),
@@ -119,29 +133,52 @@ export function parseTenantFieldMap(json: string | null | undefined): TenantFiel
   try {
     const parsed = tenantFieldMapSchema.safeParse(JSON.parse(json));
     if (!parsed.success) return defaultTenantFieldMap();
-    return ensureAllCanonicalFields(parsed.data);
+    return scrubUnmappedOxidId(ensureAllCanonicalFields(parsed.data));
   } catch {
     return defaultTenantFieldMap();
   }
+}
+
+/**
+ * oxidId must not target HubSpot unless the user maps both sides to a real property.
+ * Clears blank OXID rows and the stale default `oxid` → `oxid_id` pair (property
+ * is not a HubSpot standard field and usually does not exist on the portal).
+ */
+export function scrubUnmappedOxidId(map: TenantFieldMap): TenantFieldMap {
+  return {
+    ...map,
+    fields: map.fields.map((field) => {
+      if (field.canonical !== 'oxidId') return field;
+      if (!field.oxidPath || !field.hubspotProperty || field.hubspotProperty === 'oxid_id') {
+        return { ...field, oxidPath: null, hubspotProperty: null };
+      }
+      return field;
+    }),
+  };
 }
 
 /** Guarantees every canonical field exists once (fills gaps from defaults). */
 export function ensureAllCanonicalFields(map: TenantFieldMap): TenantFieldMap {
   const defaults = defaultTenantFieldMap();
   const byCanonical = new Map(map.fields.map((field) => [field.canonical, field]));
-  return {
+  return scrubUnmappedOxidId({
     version: 1,
-    oxidIdPaths: map.oxidIdPaths.length > 0 ? map.oxidIdPaths : defaults.oxidIdPaths,
+    // Keep configured id paths (including optional `oxid`); email remains the sync key.
+    oxidIdPaths:
+      map.oxidIdPaths.length > 0 ? map.oxidIdPaths : defaults.oxidIdPaths,
     fields: canonicalFields.map(
       (canonical) =>
         byCanonical.get(canonical) ??
         defaults.fields.find((field) => field.canonical === canonical)!,
     ),
-  };
+  });
 }
 
 export function hubspotPropertiesFromMap(map: TenantFieldMap): string[] {
-  return [...new Set([...map.fields.map((field) => field.hubspotProperty), 'email', 'lastmodifieddate'])];
+  const mapped = map.fields
+    .filter((field) => field.oxidPath && field.hubspotProperty)
+    .map((field) => field.hubspotProperty!);
+  return [...new Set([...mapped, 'email', 'lastmodifieddate'])];
 }
 
 export function getByPath(source: unknown, path: string): unknown {
@@ -169,7 +206,7 @@ function textOrNull(value: unknown): string | null {
 }
 
 /**
- * Reads an OXID field with optional child_ids fallback / street concat.
+ * Reads an OXID field with optional delivery-address fallback / street concat.
  * `user` is the raw users object (or a normalized customer-shaped record).
  */
 export function readOxidBinding(
@@ -186,23 +223,49 @@ export function readOxidBinding(
     const leaf = binding.oxidPath.includes('.')
       ? binding.oxidPath.slice(binding.oxidPath.lastIndexOf('.') + 1)
       : binding.oxidPath;
+    if (leaf === 'oxcountry' || leaf === 'oxcountryid' || leaf === 'oxtitle' || leaf === 'oxtitle_1') {
+      return pickOxidField(user as OxidRawUserRecord, (row) => {
+        const source = row as Record<string, unknown>;
+        return formatOxidCountry(source.oxcountry) ?? textOrNull(source.oxcountryid);
+      });
+    }
     return pickOxidField(user as OxidRawUserRecord, (row) =>
       textOrNull((row as Record<string, unknown>)[leaf]),
     );
   }
 
-  return textOrNull(getByPath(user, binding.oxidPath));
+  if (binding.canonical === 'salutation') {
+    if (binding.oxidPath === 'oxsal' || binding.oxidPath === 'salutation') {
+      return formatOxidSalutation(user as OxidRawUserRecord);
+    }
+    const direct = getByPath(user, binding.oxidPath);
+    return textOrNull(direct) ?? formatOxidSalutation(user as OxidRawUserRecord);
+  }
+
+  if (binding.canonical === 'country' || binding.oxidPath.startsWith('oxcountry')) {
+    const direct = getByPath(user, binding.oxidPath);
+    return (
+      formatOxidCountry(direct) ??
+      formatOxidCountry((user as OxidRawUserRecord).oxcountry) ??
+      textOrNull((user as OxidRawUserRecord).oxcountryid)
+    );
+  }
+
+  const direct = getByPath(user, binding.oxidPath);
+  return formatOxidCountry(direct) ?? textOrNull(direct);
 }
 
 export function resolveOxidRecordId(
   user: Record<string, unknown>,
   map: TenantFieldMap,
 ): string | null {
+  // Sync key remains email (`oxusername` / `email`). `oxid` may be configured in
+  // oxidIdPaths for mapping UI / future use, but is not the entity_mappings key yet.
   for (const path of map.oxidIdPaths) {
+    if (path !== 'oxusername' && path !== 'email') continue;
     const value = textOrNull(getByPath(user, path));
-    if (value) return value;
+    if (value) return normalizeValue('email', value);
   }
-  // Backward-compatible fallback for standard OXID payloads.
   return oxidUserRecordId(user as OxidRawUserRecord);
 }
 
@@ -218,6 +281,8 @@ export function canonicalFromOxidUser(
 
   const fields: CanonicalContact = {};
   for (const binding of map.fields) {
+    // Unmapped OXID paths stay out of the sync payload (e.g. oxidId left blank).
+    if (!binding.oxidPath || !binding.hubspotProperty) continue;
     fields[binding.canonical] = normalizeValue(
       binding.canonical,
       readOxidBinding(user, binding),
@@ -249,6 +314,7 @@ export function canonicalFromOxidCustomer(
 export function canonicalFromHubspot(contact: HubspotContact, map: TenantFieldMap): CanonicalContact {
   const fields: CanonicalContact = {};
   for (const binding of map.fields) {
+    if (!binding.oxidPath || !binding.hubspotProperty) continue;
     fields[binding.canonical] = normalizeValue(
       binding.canonical,
       contact.properties[binding.hubspotProperty] ?? null,
@@ -263,6 +329,7 @@ export function toHubspotPropertiesWithMap(
 ): HubspotProperties {
   const properties: HubspotProperties = {};
   for (const binding of map.fields) {
+    if (!binding.oxidPath || !binding.hubspotProperty) continue;
     const value = contact[binding.canonical];
     if (value === undefined) continue;
     properties[binding.hubspotProperty] = value ?? '';
@@ -314,6 +381,7 @@ export function discoverKeys(value: unknown, prefix = '', depth = 0): Discovered
 /**
  * Unwraps `{ users: {...} }` samples so discovered paths match oxidPath
  * (relative to the users object), while also exposing wrapper keys if present.
+ * Only needful OXID keys are discovered — shop modules often dump the full row.
  */
 export function discoverOxidPayloadKeys(payload: unknown): {
   keys: DiscoveredKey[];
@@ -324,10 +392,13 @@ export function discoverOxidPayloadKeys(payload: unknown): {
   }
   const root = payload as Record<string, unknown>;
   if (root.users && typeof root.users === 'object' && !Array.isArray(root.users)) {
-    const users = root.users as Record<string, unknown>;
+    const users = pickNeedfulOxidUser(root.users as Record<string, unknown>);
     return { keys: discoverKeys(users), usersObject: users };
   }
-  return { keys: discoverKeys(root), usersObject: root };
+  return {
+    keys: discoverKeys(pickNeedfulOxidUser(root)),
+    usersObject: pickNeedfulOxidUser(root),
+  };
 }
 
 /** Suggest oxid paths from discovered keys using common OXID / camelCase names. */
@@ -340,21 +411,78 @@ export function suggestMapFromKeys(keys: DiscoveredKey[]): TenantFieldMap {
     email: has('oxusername', 'email', 'users.oxusername'),
     firstName: has('oxfname', 'firstName', 'firstname'),
     lastName: has('oxlname', 'lastName', 'lastname'),
-    phone: has('oxfon', 'phone', 'child_ids.0.oxfon'),
-    company: has('oxcompany', 'company', 'child_ids.0.oxcompany'),
-    address: has('oxstreet', 'address', 'child_ids.0.oxstreet'),
-    city: has('oxcity', 'city', 'child_ids.0.oxcity'),
-    zip: has('oxzip', 'zip', 'child_ids.0.oxzip'),
-    country: has('oxcountryid', 'country', 'child_ids.0.oxcountryid'),
+    salutation: has(
+      'salutation.title_1',
+      'salutation.title',
+      'salutation.id',
+      'oxsal',
+    ),
+    // Never auto-map `oxid` into HubSpot — keep blank; id is stored via oxidIdPaths / rawOxid.
+    oxidId: null,
+    phone: has(
+      'oxfon',
+      'phone',
+      'oxmobfon',
+      'oxaddress.0.oxfon',
+      'child_ids.0.oxfon',
+      'deliveryAddress.0.oxfon',
+    ),
+    company: has(
+      'oxcompany',
+      'company',
+      'oxaddress.0.oxcompany',
+      'child_ids.0.oxcompany',
+      'deliveryAddress.0.oxcompany',
+    ),
+    address: has(
+      'oxstreet',
+      'address',
+      'oxaddress.0.oxstreet',
+      'child_ids.0.oxstreet',
+      'deliveryAddress.0.oxstreet',
+    ),
+    city: has(
+      'oxcity',
+      'city',
+      'oxaddress.0.oxcity',
+      'child_ids.0.oxcity',
+      'deliveryAddress.0.oxcity',
+    ),
+    zip: has(
+      'oxzip',
+      'zip',
+      'oxaddress.0.oxzip',
+      'child_ids.0.oxzip',
+      'deliveryAddress.0.oxzip',
+    ),
+    country: has(
+      'oxcountry.oxtitle',
+      'oxcountry.oxtitle_1',
+      'oxcountry.oxisoalpha2',
+      'oxcountry',
+      'oxcountryid',
+      'country',
+      'oxaddress.0.oxcountry.oxtitle',
+      'child_ids.0.oxcountryid',
+      'deliveryAddress.0.oxcountryid',
+    ),
   };
 
-  const oxidIdPaths = ['oxid', 'mcustnr', 'id'].filter((path) => paths.has(path));
+  const emailIdPaths = ['oxusername', 'email'].filter((path) => paths.has(path));
+  const oxidIdPaths = [
+    ...(emailIdPaths.length > 0 ? emailIdPaths : ['oxusername']),
+    'oxid',
+  ];
   return {
     version: 1,
-    oxidIdPaths: oxidIdPaths.length > 0 ? oxidIdPaths : base.oxidIdPaths,
+    oxidIdPaths,
     fields: base.fields.map((field) => ({
       ...field,
-      oxidPath: suggestions[field.canonical] ?? field.oxidPath,
+      oxidPath:
+        field.canonical === 'oxidId'
+          ? null
+          : (suggestions[field.canonical] ?? field.oxidPath),
+      hubspotProperty: field.canonical === 'oxidId' ? null : field.hubspotProperty,
     })),
   };
 }

@@ -1,17 +1,23 @@
 /**
- * Registers (or re-points) the app's contact webhook subscription.
+ * Registers (or re-points) the app's contact webhook subscriptions.
  *
- * Webhook configuration is per app, not per installed account, so this is run
- * once per environment - and again whenever BASE_URL changes, which in local
- * development means every time the tunnel URL changes.
+ * Subscribes to:
+ *   - object.creation for contacts (HubSpot generic CRM format)
+ *   - object.propertyChange for each mapped HubSpot contact property we sync
+ *
+ * Webhook configuration is per app, not per installed account — run once per
+ * environment (and again whenever BASE_URL / tunnel URL changes):
  *
  *   npm run hubspot:webhooks
  */
 import { env } from '../src/config/env';
+import {
+  contactWebhookSubscriptionSpecs,
+  subscriptionRowKey,
+  subscriptionSpecKey,
+} from '../src/hubspot/webhookSubscriptions';
 
 const API = 'https://api.hubapi.com/webhooks/v3';
-const EVENT_TYPES = ['contact.propertyChange', 'contact.creation'] as const;
-const WATCHED_PROPERTIES = ['email', 'firstname', 'lastname', 'phone'] as const;
 
 function requireConfig(): { appId: string; developerApiKey: string } {
   const { HUBSPOT_APP_ID: appId, HUBSPOT_DEVELOPER_API_KEY: developerApiKey } = env;
@@ -42,6 +48,7 @@ async function call(
 async function main(): Promise<void> {
   const { appId } = requireConfig();
   const targetUrl = `${env.BASE_URL}/webhooks/hubspot`;
+  const desired = contactWebhookSubscriptionSpecs();
 
   const settings = await call(`/${appId}/settings`, {
     method: 'PUT',
@@ -54,32 +61,39 @@ async function main(): Promise<void> {
 
   const existing = await call(`/${appId}/subscriptions`, { method: 'GET' });
   const known = new Set(
-    ((existing.body as { results?: Array<{ eventType?: string; propertyName?: string }> })
-      ?.results ?? []).map((row) => `${row.eventType}:${row.propertyName ?? ''}`),
+    (
+      (existing.body as {
+        results?: Array<{ eventType?: string; objectTypeId?: string; propertyName?: string }>;
+      })?.results ?? []
+    ).map((row) => subscriptionRowKey(row)),
   );
 
-  for (const eventType of EVENT_TYPES) {
-    const properties =
-      eventType === 'contact.propertyChange' ? [...WATCHED_PROPERTIES] : [undefined];
+  process.stdout.write(
+    `subscribing to object.creation + ${desired.filter((spec) => spec.propertyName).length} property changes\n`,
+  );
 
-    for (const propertyName of properties) {
-      const key = `${eventType}:${propertyName ?? ''}`;
-      if (known.has(key)) {
-        process.stdout.write(`already subscribed: ${key}\n`);
-        continue;
-      }
-
-      const created = await call(`/${appId}/subscriptions`, {
-        method: 'POST',
-        body: { eventType, active: true, ...(propertyName ? { propertyName } : {}) },
-      });
-
-      if (created.status >= 300) {
-        process.stderr.write(`failed ${key}: ${created.status} ${JSON.stringify(created.body)}\n`);
-        continue;
-      }
-      process.stdout.write(`subscribed: ${key}\n`);
+  for (const spec of desired) {
+    const key = subscriptionSpecKey(spec);
+    if (known.has(key)) {
+      process.stdout.write(`already subscribed: ${key}\n`);
+      continue;
     }
+
+    const created = await call(`/${appId}/subscriptions`, {
+      method: 'POST',
+      body: {
+        active: true,
+        eventType: spec.eventType,
+        objectTypeId: spec.objectTypeId,
+        ...(spec.propertyName ? { propertyName: spec.propertyName } : {}),
+      },
+    });
+
+    if (created.status >= 300) {
+      process.stderr.write(`failed ${key}: ${created.status} ${JSON.stringify(created.body)}\n`);
+      continue;
+    }
+    process.stdout.write(`subscribed: ${key}\n`);
   }
 }
 

@@ -23,7 +23,6 @@ import {
   hubspotPropertiesFromMap,
   parseTenantFieldMap,
   toHubspotPropertiesWithMap,
-  toOxidInputWithMap,
 } from './tenantFieldMap';
 
 export interface SourceRecord {
@@ -100,27 +99,57 @@ async function findOrCreateMapping(
   integrationId: string,
   origin: SyncOrigin,
   sourceId: string,
+  email: string,
 ): Promise<EntityMappingRow> {
-  const existing =
-    origin === 'hubspot'
-      ? await entityMappingsRepo.findByHubspotContactId(integrationId, sourceId)
-      : await entityMappingsRepo.findByOxidCustomerId(integrationId, sourceId);
+  if (origin === 'hubspot') {
+    const byHubspot = await entityMappingsRepo.findByHubspotContactId(integrationId, sourceId);
+    const byEmail = await entityMappingsRepo.findByOxidCustomerId(integrationId, email);
 
-  if (existing) return existing;
+    if (byHubspot && byEmail && byHubspot.id !== byEmail.id) {
+      // Half-mapped rows from earlier syncs — collapse into the HubSpot row.
+      return entityMappingsRepo.mergeMappings(integrationId, byHubspot.id, byEmail.id);
+    }
+    if (byHubspot) return byHubspot;
+    if (byEmail) {
+      await entityMappingsRepo.linkCounterpart(integrationId, byEmail.id, {
+        hubspotContactId: sourceId,
+      });
+      const linked = await entityMappingsRepo.findById(integrationId, byEmail.id);
+      if (linked) return linked;
+      return byEmail;
+    }
 
+    return createMapping(integrationId, { hubspotContactId: sourceId });
+  }
+
+  const byEmail = await entityMappingsRepo.findByOxidCustomerId(integrationId, email);
+  if (byEmail) return byEmail;
+
+  return createMapping(integrationId, { oxidCustomerId: email });
+}
+
+async function createMapping(
+  integrationId: string,
+  input: { hubspotContactId?: string | null; oxidCustomerId?: string | null },
+): Promise<EntityMappingRow> {
   try {
-    return await entityMappingsRepo.create({
-      integrationId,
-      ...(origin === 'hubspot' ? { hubspotContactId: sourceId } : { oxidCustomerId: sourceId }),
-    });
+    return await entityMappingsRepo.create({ integrationId, ...input });
   } catch (error) {
-    // Unique violation: a concurrent sync created it first, so take theirs.
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-      const raced =
-        origin === 'hubspot'
-          ? await entityMappingsRepo.findByHubspotContactId(integrationId, sourceId)
-          : await entityMappingsRepo.findByOxidCustomerId(integrationId, sourceId);
-      if (raced) return raced;
+      if (input.hubspotContactId) {
+        const raced = await entityMappingsRepo.findByHubspotContactId(
+          integrationId,
+          input.hubspotContactId,
+        );
+        if (raced) return raced;
+      }
+      if (input.oxidCustomerId) {
+        const raced = await entityMappingsRepo.findByOxidCustomerId(
+          integrationId,
+          input.oxidCustomerId,
+        );
+        if (raced) return raced;
+      }
     }
     throw error;
   }
@@ -167,28 +196,10 @@ async function writeToOxid(
 ): Promise<string> {
   const client = oxidClientFor(integration);
   const map = parseTenantFieldMap(integration.fieldMappingJson);
-  const input = toOxidInputWithMap(contact, map);
-
-  if (mapping.oxidCustomerId) {
-    const existing = await client.getCustomer(mapping.oxidCustomerId);
-    if (existing) {
-      const updated = await client.updateCustomer(mapping.oxidCustomerId, input);
-      return updated.id;
-    }
-    logger.warn(
-      { integrationId: integration.id, oxidCustomerId: mapping.oxidCustomerId },
-      'mapped OXID customer is gone, re-matching by email',
-    );
-  }
-
-  const byEmail = await client.findCustomerByEmail(email);
-  if (byEmail) {
-    const updated = await client.updateCustomer(byEmail.id, input);
-    return updated.id;
-  }
-
-  const created = await client.createCustomer({ ...input, email });
-  return created.id;
+  const result = await client.upsertCustomerByEmail(email, contact, map, {
+    oxidRecordId: mapping.oxidRecordId,
+  });
+  return result.id;
 }
 
 /**
@@ -211,32 +222,30 @@ export async function syncContact(input: SyncContactInput): Promise<SyncContactR
     return { status: 'skipped_unsupported', reason: 'delete not supported' };
   }
 
-  const mapping = await findOrCreateMapping(integrationId, origin, sourceRecord.id);
   const contact = await hydrate(integration, origin, sourceRecord);
 
   if (!contact) {
     await syncEventsRepo.log({
       integrationId,
       direction,
-      entityMappingId: mapping.id,
       status: 'error',
       detail: { reason: 'source record not found', sourceId: sourceRecord.id },
     });
-    return { status: 'error', entityMappingId: mapping.id, reason: 'source record not found' };
+    return { status: 'error', reason: 'source record not found' };
   }
 
   const email = emailOf(contact);
   if (!email) {
-    // Email is the natural key for first-sync matching on both sides.
     await syncEventsRepo.log({
       integrationId,
       direction,
-      entityMappingId: mapping.id,
       status: 'skipped_no_email',
       detail: { reason: 'record has no email', sourceId: sourceRecord.id },
     });
-    return { status: 'skipped_no_email', entityMappingId: mapping.id, reason: 'no email' };
+    return { status: 'skipped_no_email', reason: 'no email' };
   }
+
+  const mapping = await findOrCreateMapping(integrationId, origin, sourceRecord.id, email);
 
   const hash = contactHash(contact);
 
@@ -265,26 +274,38 @@ export async function syncContact(input: SyncContactInput): Promise<SyncContactR
         ? await writeToHubspot(integration, mapping, contact, email)
         : await writeToOxid(integration, mapping, contact, email);
 
+    const oxidFromPayload =
+      sourceRecord.rawOxid && typeof sourceRecord.rawOxid.oxid === 'string'
+        ? sourceRecord.rawOxid.oxid
+        : null;
+
     const link =
       direction === 'oxid_to_hubspot'
-        ? { hubspotContactId: destinationId }
-        : { oxidCustomerId: destinationId };
+        ? {
+            hubspotContactId: destinationId,
+            ...(oxidFromPayload ? { oxidRecordId: oxidFromPayload } : {}),
+          }
+        : {
+            oxidCustomerId: email,
+            // Store OXID object id for future update-by-oxid; User API writes still use email.
+            ...(destinationId.includes('@') ? {} : { oxidRecordId: destinationId }),
+          };
 
-    await entityMappingsRepo.linkCounterpart(integrationId, mapping.id, link);
-    await entityMappingsRepo.recordSync(integrationId, mapping.id, { hash, source: origin });
+    const linked = await entityMappingsRepo.linkCounterpart(integrationId, mapping.id, link);
+    await entityMappingsRepo.recordSync(integrationId, linked.id, { hash, source: origin });
 
     const result: SyncContactResult = {
       status: 'success',
-      entityMappingId: mapping.id,
+      entityMappingId: linked.id,
       hubspotContactId:
-        direction === 'oxid_to_hubspot' ? destinationId : mapping.hubspotContactId,
-      oxidCustomerId: direction === 'hubspot_to_oxid' ? destinationId : mapping.oxidCustomerId,
+        direction === 'oxid_to_hubspot' ? destinationId : linked.hubspotContactId,
+      oxidCustomerId: email,
     };
 
     await syncEventsRepo.log({
       integrationId,
       direction,
-      entityMappingId: mapping.id,
+      entityMappingId: linked.id,
       status: 'success',
       detail: {
         sourceId: sourceRecord.id,

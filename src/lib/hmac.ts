@@ -88,17 +88,28 @@ export function verifyHubspotSignature(input: {
     : { ok: false, reason: 'signature mismatch' };
 }
 
-export function oxidSignatureFor(rawBody: string, timestamp: string, secret: string): string {
-  const digest = createHmac('sha256', secret)
+export function oxidSignatureDigest(rawBody: string, timestamp: string, secret: string): string {
+  return createHmac('sha256', secret)
     .update(`${timestamp}.${rawBody}`, 'utf8')
-    .digest('hex');
-  return `sha256=${digest}`;
+    .digest('base64');
 }
 
+/** Header value as sent by the MWV shop module: `sha256=` + base64 digest. */
+export function oxidSignatureFor(rawBody: string, timestamp: string, secret: string): string {
+  return `sha256=${oxidSignatureDigest(rawBody, timestamp, secret)}`;
+}
+
+export function stripOxidSignaturePrefix(signature: string): string {
+  return signature.startsWith('sha256=') ? signature.slice('sha256='.length) : signature;
+}
+
+/** Replay window for OXID/MWV webhooks (`X-MWV-Timestamp` is Unix seconds). */
+export const OXID_SIGNATURE_TOLERANCE_SEC = 5 * 60;
+
 /**
- * Verifies `X-Oxid-Signature` as specified in docs/oxid-module-contract.md:
- * hex HMAC-SHA256 over `timestamp + "." + rawBody`, keyed with the shop's
- * per-tenant webhook secret.
+ * Verifies MWV shop webhook signatures:
+ * `X-MWV-Signature: sha256=` + base64(HMAC-SHA256(timestamp + "." + rawBody, secret))
+ * with `X-MWV-Timestamp` as Unix time in seconds (PHP `time()`).
  */
 export function verifyOxidSignature(input: {
   rawBody: string;
@@ -107,19 +118,20 @@ export function verifyOxidSignature(input: {
   secret: string;
   now?: number;
 }): VerificationResult {
-  if (!input.signature) return { ok: false, reason: 'missing x-oxid-signature header' };
-  if (!input.timestamp) return { ok: false, reason: 'missing x-oxid-timestamp header' };
+  if (!input.signature) return { ok: false, reason: 'missing x-mwv-signature header' };
+  if (!input.timestamp) return { ok: false, reason: 'missing x-mwv-timestamp header' };
 
-  const timestampMs = Number(input.timestamp);
-  if (!Number.isFinite(timestampMs)) return { ok: false, reason: 'timestamp is not a number' };
+  const timestampSec = Number(input.timestamp);
+  if (!Number.isFinite(timestampSec)) return { ok: false, reason: 'timestamp is not a number' };
 
-  const now = input.now ?? Date.now();
-  if (Math.abs(now - timestampMs) > SIGNATURE_TOLERANCE_MS) {
+  const nowSec = Math.floor((input.now ?? Date.now()) / 1000);
+  if (Math.abs(nowSec - timestampSec) > OXID_SIGNATURE_TOLERANCE_SEC) {
     return { ok: false, reason: 'timestamp outside the 5 minute tolerance' };
   }
 
-  const expected = oxidSignatureFor(input.rawBody, input.timestamp, input.secret);
-  return safeEqual(input.signature, expected)
+  const provided = stripOxidSignaturePrefix(input.signature);
+  const expected = oxidSignatureDigest(input.rawBody, input.timestamp, input.secret);
+  return safeEqual(provided, expected)
     ? { ok: true }
     : { ok: false, reason: 'signature mismatch' };
 }

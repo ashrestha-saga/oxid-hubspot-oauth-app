@@ -86,8 +86,8 @@ because it only verifies and enqueues, but the shop should not depend on that.
 ```http
 POST {webhook_url}
 Content-Type: application/json
-X-Oxid-Timestamp: 1775298753123
-X-Oxid-Signature: sha256=<hex>
+X-MWV-Timestamp: 1725704400
+X-MWV-Signature: sha256=<base64>
 
 {
   "event": "customer.updated",
@@ -106,10 +106,10 @@ X-Oxid-Signature: sha256=<hex>
 
 Rules:
 
-- `customer.id` is required and must be the shop's stable customer id (`oxid` column of
-  `oxuser`). It is what the backend stores as `oxid_customer_id`.
-- `customer.email` is required for `created`/`updated`. Without it there is nothing to match on in
-  HubSpot and the event is logged as `skipped_no_email`.
+- `customer.email` is **required** — it is the unique key for matching and dedupe on both sides.
+  Without it the event is logged as `skipped_no_email`.
+- `customer.id` (OXID internal id) is optional metadata; the backend keys records by normalized
+  email, not by `id` or `mcustnr`.
 - Omit or `null` any field the shop does not have. `null` means "no value", it does not mean
   "unchanged".
 - `occurredAt` and `customer.updatedAt` are ISO-8601 UTC.
@@ -119,7 +119,8 @@ Rules:
 #### 2.2.1 Alternative: raw OXID `users` object (no normalization in the module)
 
 If the shop module already has the native OXID user row, it may POST it as-is. The backend maps
-field names automatically via `fromOxidUserWebhook()`:
+field names automatically via `fromOxidUserWebhook()`. **`oxusername` (email) is required** and is
+the record key; `mcustnr` and `oxid` are optional metadata and are not used for dedupe:
 
 ```json
 {
@@ -127,7 +128,6 @@ field names automatically via `fromOxidUserWebhook()`:
     "oxusername": "j.smith02@merzljak.de",
     "oxfname": "Jane02",
     "oxlname": "Smith02",
-    "mcustnr": "66666692",
     "oxcreate": "2026-07-31T17:28:36+02:00",
     "child_ids": [{ "oxfon": "+49 30 12345678" }]
   }
@@ -136,15 +136,17 @@ field names automatically via `fromOxidUserWebhook()`:
 
 ### 2.3 Signature
 
-The signed string is the timestamp, a literal dot, then the **exact raw JSON bytes** that are sent:
+The signed string is the timestamp, a literal dot, then the **exact raw JSON bytes** that are sent
+(MWV shop module contract):
 
 ```
-signedPayload = X-Oxid-Timestamp + "." + rawBody
-signature     = "sha256=" + bin2hex(hmac_sha256(signedPayload, webhook_secret))
+signedPayload = X-MWV-Timestamp + "." + rawBody
+signature     = "sha256=" + base64(hmac_sha256(signedPayload, webhook_secret))
 ```
 
-`X-Oxid-Timestamp` is Unix time in **milliseconds**. The backend rejects anything more than 5
-minutes off its own clock, so the shop's clock must be roughly correct (NTP).
+`X-MWV-Timestamp` is Unix time in **seconds** (PHP `time()`). The backend rejects anything more than 5
+minutes off its own clock, so the shop's clock must be roughly correct (NTP). The receiver strips the
+`sha256=` prefix before comparing digests.
 
 ### 2.4 Responses and retries
 
@@ -162,11 +164,24 @@ minutes off its own clock, so the shop's clock must be roughly correct (NTP).
 ## 3. What the backend needs to call *into* OXID
 
 For the HubSpot → OXID direction, the backend uses **OAuth 2.0 bearer tokens** (refresh-token
-grant) against the MWV API. See [API_DOCUMENTATION.md](../../API_DOCUMENTATION.md).
+grant) against the MWV User API. See [API_DOCUMENTATION.md](../../API_DOCUMENTATION.md).
 
-The real adapter lives in [../src/oxid/adapters/oxapiClient.ts](../src/oxid/adapters/oxapiClient.ts)
-(`OXID_CLIENT_MODE=oxapi`). Confirm read/create/update/list endpoints for customers using
-`Authorization: Bearer <access_token>`.
+The real adapter is [../src/oxid/adapters/oxapiClient.ts](../src/oxid/adapters/oxapiClient.ts)
+(`OXID_CLIENT_MODE=oxapi`).
+
+### 3.1 HubSpot → OXID (email-first upsert)
+
+When HubSpot fires `object.creation` or a mapped `object.propertyChange`, the backend:
+
+1. Fetches the full contact from HubSpot CRM by `objectId` (webhooks do not include email).
+2. Normalizes email as the natural key (`oxusername`).
+3. Calls `POST ?cl=userapi&fnc=updateUsers` with mapped fields (`oxfname`, `oxlname`, `oxfon`, …).
+4. If the shop returns "user not found", calls `POST ?cl=userapi&fnc=insertUsers` with the same
+   fields. When `OXID_USER_INSERT_PASSWORD` is configured, an encrypted `password` is included;
+   otherwise the field is omitted.
+
+After a successful write, the backend stores the normalized **email** in `entity_mappings` as the
+OXID-side key for future sync and loop detection.
 
 ---
 
@@ -178,13 +193,13 @@ Signed webhook (credentials from HubSpot Settings after OAuth):
 SECRET='<webhook_secret from Settings>'
 SHOP_ID='<oxid_shop_id from Settings>'
 BODY='{"event":"customer.updated","shopId":"'$SHOP_ID'","customer":{"id":"c-1","email":"kunde@example.com","firstName":"Anna","lastName":"Beispiel","phone":"+49301234"}}'
-TS=$(($(date +%s) * 1000))
-SIG=$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's/^.* //')
+TS=$(date +%s)
+SIG=$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -binary | base64)
 
 curl -sS -X POST "$BACKEND_URL/webhooks/oxid/$SHOP_ID" \
   -H 'Content-Type: application/json' \
-  -H "X-Oxid-Timestamp: $TS" \
-  -H "X-Oxid-Signature: sha256=$SIG" \
+  -H "X-MWV-Timestamp: $TS" \
+  -H "X-MWV-Signature: sha256=$SIG" \
   --data-raw "$BODY"
 ```
 

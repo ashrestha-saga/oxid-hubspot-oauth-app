@@ -7,7 +7,8 @@ const testEnv: Record<string, string> = {
   LOG_LEVEL: 'silent',
   PORT: '3000',
   BASE_URL: 'https://backend.test',
-  DATABASE_URL: 'file:./test.db',
+  // Dummy URL — unit tests mock Prisma; provider must match schema (mysql).
+  DATABASE_URL: 'mysql://test:test@127.0.0.1:3306/test',
   HUBSPOT_CLIENT_ID: 'test-client-id',
   HUBSPOT_CLIENT_SECRET: 'test-client-secret',
   HUBSPOT_REDIRECT_URI: 'https://backend.test/oauth/callback',

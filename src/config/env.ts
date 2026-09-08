@@ -57,11 +57,17 @@ const envSchema = z.object({
         .map((entry) => entry.trim())
         .filter(Boolean),
     ),
+  /**
+   * Optional AES-256-CBC encrypted password for insertUsers when HubSpot creates
+   * a contact that does not exist in OXID yet. Omitted from the API call when unset.
+   * See API_DOCUMENTATION.md.
+   */
+  OXID_USER_INSERT_PASSWORD: z.string().min(1).optional(),
 
   RECONCILE_INTERVAL_MINUTES: z.coerce.number().int().min(1).default(15),
   RUN_WORKER_IN_WEB: booleanish.default('true'),
   SYNC_WORKER_POLL_MS: z.coerce.number().int().min(250).default(2000),
-  SYNC_JOB_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(5),
+  SYNC_JOB_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(3),
 });
 
 export type Env = z.infer<typeof envSchema> & {

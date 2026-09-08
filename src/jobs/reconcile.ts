@@ -5,6 +5,7 @@ import { syncJobsRepo } from '../db/repositories/syncJobs';
 import { hubspotClientFor } from '../hubspot/client';
 import { logger } from '../lib/logger';
 import { oxidClientFor } from '../oxid/client';
+import { emailOf } from '../sync/fieldMap';
 import {
   canonicalFromHubspot,
   canonicalFromOxidCustomer,
@@ -108,9 +109,13 @@ export async function reconcileIntegration(
     summary.oxidScanned = customers.length;
 
     for (const customer of customers) {
+      const fields = canonicalFromOxidCustomer(customer, map);
+      const email = emailOf(fields);
+      if (!email) continue;
+
       const queued = await enqueueIfChanged(integration.id, 'oxid_to_hubspot', 'oxid', {
-        id: customer.id,
-        fields: canonicalFromOxidCustomer(customer, map),
+        id: email,
+        fields,
         rawOxid: customer as unknown as Record<string, unknown>,
       });
       if (queued) summary.queued += 1;

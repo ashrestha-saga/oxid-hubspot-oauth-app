@@ -2,6 +2,7 @@ export interface MappingPageProps {
   state: 'no_session' | 'need_pairing' | 'ready';
   portalId?: string;
   shopUrl?: string | null;
+  shopName?: string | null;
   oxidShopId?: string | null;
   mappingStatus?: string | null;
   installUrl: string;
@@ -156,48 +157,100 @@ const SCRIPT = `
     if (selected && !names.has(selected)) {
       state.properties = [{ name: selected, label: selected + ' (current)', type: 'string' }, ...state.properties];
     }
-    return state.properties.map((p) =>
-      '<option value="' + escape(p.name) + '"' + (p.name === selected ? ' selected' : '') + '>' +
-      escape(p.label + ' (' + p.name + ')') + '</option>'
-    ).join('');
-  }
-
-  function oxidOptions(selected) {
     const opts = ['<option value="">— unmapped —</option>'];
-    const seen = new Set();
-    for (const key of state.keys) {
-      seen.add(key.path);
+    for (const p of state.properties) {
       opts.push(
-        '<option value="' + escape(key.path) + '"' + (key.path === selected ? ' selected' : '') + '>' +
-        escape(key.path + (key.sample ? ' = ' + key.sample : '')) + '</option>'
+        '<option value="' + escape(p.name) + '"' + (p.name === selected ? ' selected' : '') + '>' +
+        escape(p.label + ' (' + p.name + ')') + '</option>'
       );
     }
-    if (selected && !seen.has(selected)) {
-      opts.push('<option value="' + escape(selected) + '" selected>' + escape(selected) + ' (saved)</option>');
-    }
     return opts.join('');
+  }
+
+  /** Always offered in the OXID dropdown (even if missing from the sample). */
+  const STANDARD_OXID_PATHS = [
+    'oxusername',
+    'oxfname',
+    'oxlname',
+    'oxsal',
+    'salutation.title_1',
+    'salutation.title',
+    'oxfon',
+    'oxcompany',
+    'oxstreet',
+    'oxstreetnr',
+    'oxzip',
+    'oxcity',
+    'oxcountry.oxtitle',
+    'oxcountry.oxisoalpha2',
+    'oxcountryid',
+  ];
+
+  function oxidOptions(selected, { includeOxidId = false } = {}) {
+    const opts = ['<option value="">— unmapped —</option>'];
+    const seen = new Set();
+    const add = (path, sample) => {
+      if (!path || seen.has(path)) return;
+      seen.add(path);
+      const label = sample ? path + ' = ' + sample : path;
+      opts.push(
+        '<option value="' + escape(path) + '"' + (path === selected ? ' selected' : '') + '>' +
+        escape(label) + '</option>'
+      );
+    };
+    if (includeOxidId) add('oxid', null);
+    for (const path of STANDARD_OXID_PATHS) add(path, null);
+    for (const key of state.keys) {
+      if (!includeOxidId && key.path === 'oxid') continue;
+      add(key.path, key.sample);
+    }
+    if (selected && !seen.has(selected)) add(selected, '(saved)');
+    return opts.join('');
+  }
+
+  function selectedOxidIdPath() {
+    const paths = state.map?.oxidIdPaths || [];
+    return paths.find((p) => p === 'oxid') || paths.find((p) => p !== 'oxusername' && p !== 'email') || 'oxid';
   }
 
   function renderMapEditor() {
     const root = document.getElementById('map-grid');
     if (!state.map) return;
-    root.innerHTML = state.map.fields.map((field, index) =>
+    const idPath = selectedOxidIdPath();
+    const idRow =
+      '<div class="map-row" data-id-row="1">' +
+        '<div class="canon">oxid (record id)</div>' +
+        '<div><label>OXID field</label><select class="oxid-id-path">' + oxidOptions(idPath, { includeOxidId: true }) + '</select></div>' +
+        '<div><label>HubSpot</label><p class="hint" style="margin:0">Not mapped to HubSpot. Stored for matching only.</p></div>' +
+      '</div>';
+    const fieldRows = state.map.fields.map((field, index) =>
       '<div class="map-row" data-index="' + index + '">' +
         '<div class="canon">' + escape(field.canonical) + (field.canonical === 'email' ? ' *' : '') + '</div>' +
         '<div><label>OXID field</label><select class="oxid-path">' + oxidOptions(field.oxidPath) + '</select></div>' +
         '<div><label>HubSpot property</label><select class="hs-prop">' + propertyOptions(field.hubspotProperty) + '</select></div>' +
       '</div>'
     ).join('');
+    root.innerHTML = idRow + fieldRows;
   }
 
   function readMapFromEditor() {
-    const fields = [...document.querySelectorAll('.map-row')].map((row, index) => {
+    const fields = [...document.querySelectorAll('.map-row[data-index]')].map((row, index) => {
       const base = state.map.fields[index];
       const oxidPath = row.querySelector('.oxid-path').value || null;
-      const hubspotProperty = row.querySelector('.hs-prop').value;
+      const hubspotProperty = row.querySelector('.hs-prop').value || null;
+      // Both sides required to sync a field; blank OXID clears HubSpot target too.
+      if (!oxidPath) {
+        return { ...base, oxidPath: null, hubspotProperty: null };
+      }
       return { ...base, oxidPath, hubspotProperty };
     });
-    return { ...state.map, fields };
+    const idSelect = document.querySelector('.oxid-id-path');
+    const extraId = idSelect && idSelect.value ? idSelect.value : 'oxid';
+    const oxidIdPaths = ['oxusername'];
+    if (extraId && extraId !== 'oxusername' && extraId !== 'email') {
+      oxidIdPaths.push(extraId);
+    }
+    return { ...state.map, fields, oxidIdPaths };
   }
 
   async function refreshState() {
@@ -378,7 +431,7 @@ export function renderMappingPage(props: MappingPageProps): string {
   return shell(
     `
     <h1>Map OXID fields → HubSpot</h1>
-    <p class="sub">Portal ${escapeHtml(props.portalId ?? '')} · Shop ${escapeHtml(props.shopUrl ?? props.oxidShopId ?? '')}. Current map: <strong>${escapeHtml(props.mappingStatus ?? 'default')}</strong>.</p>
+    <p class="sub">Portal ${escapeHtml(props.portalId ?? '')} · Shop ${escapeHtml(props.shopName ?? props.shopUrl ?? props.oxidShopId ?? '')}. Current map: <strong>${escapeHtml(props.mappingStatus ?? 'default')}</strong>.</p>
 
     <div class="steps">
       <span class="step-pill active" data-step="1">1. Choose path</span>
@@ -398,7 +451,7 @@ export function renderMappingPage(props: MappingPageProps): string {
     <section class="panel" data-step="2">
       <label>Probe URL (HMAC-signed POST from OXID / Postman)</label>
       <div class="code">${escapeHtml(props.probeUrl ?? '')}</div>
-      <p class="hint">Same signing headers as the live webhook (<code>X-Oxid-Timestamp</code>, <code>X-Oxid-Signature</code>). The probe stores keys only — it does not sync to HubSpot.</p>
+      <p class="hint">Same signing headers as the live webhook (<code>X-MWV-Timestamp</code>, <code>X-MWV-Signature</code>). The probe stores keys only — it does not sync to HubSpot.</p>
       <p class="hint" id="sample-status">Waiting for a sample…</p>
       <div class="row-actions">
         <button type="button" class="secondary" id="poll-sample">I sent the probe — refresh</button>
@@ -418,7 +471,7 @@ export function renderMappingPage(props: MappingPageProps): string {
     </section>
 
     <section class="panel" data-step="3">
-      <p class="hint">Pick which OXID path feeds each HubSpot contact property. Email is required.</p>
+      <p class="hint">Pick which OXID path feeds each HubSpot contact property. Email is required. Leave <code>oxidId</code> unmapped on both sides unless you have created a matching HubSpot property — the shop record id is stored separately for matching.</p>
       <div class="map-grid" id="map-grid"></div>
       <div class="preview" id="preview-box" style="display:none">
         <strong>Dry-run preview</strong>

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { env } from '../config/env';
-import { integrationsRepo, isOxidOAuthConnected, oxidWebhookSecret } from '../db/repositories/integrations';
+import { integrationsRepo, oxidWebhookSecret } from '../db/repositories/integrations';
 import { BadRequestError, NotFoundError, UnauthorizedError } from '../lib/errors';
 import { randomToken, randomUUID } from '../lib/crypto';
 import { logger } from '../lib/logger';
@@ -143,7 +143,23 @@ oxidOAuthRouter.get(
       logger.warn({ err, integrationId: integration.id }, 'OXID profile fetch failed after token exchange');
     }
 
-    const oxidShopId = integration.oxidShopId ?? randomUUID();
+    const oxidShopId = tokens.shopId ?? integration.oxidShopId ?? randomUUID();
+    if (!tokens.shopId) {
+      logger.warn(
+        { integrationId: integration.id, oxidShopId },
+        'OXID token response missing shop_id; using existing or generated shop id',
+      );
+    }
+
+    if (tokens.shopId) {
+      const conflict = await integrationsRepo.findByOxidShopId(tokens.shopId);
+      if (conflict && conflict.id !== integration.id) {
+        throw new BadRequestError(
+          `shop_id "${tokens.shopId}" is already linked to another HubSpot portal`,
+        );
+      }
+    }
+
     const webhookSecret =
       integration.oxidWebhookSecret != null
         ? oxidWebhookSecret(integration)
@@ -151,6 +167,7 @@ oxidOAuthRouter.get(
 
     await integrationsRepo.attachOxidFromOAuth(integration.id, {
       oxidShopId,
+      oxidShopName: tokens.shopName ?? integration.oxidShopName ?? null,
       oxidBaseUrl: verified.shopUrl,
       clientId: verified.clientId,
       clientSecret: verified.clientSecret,
@@ -161,7 +178,12 @@ oxidOAuthRouter.get(
     });
 
     logger.info(
-      { integrationId: integration.id, oxidShopId, shopUrl: verified.shopUrl },
+      {
+        integrationId: integration.id,
+        oxidShopId,
+        oxidShopName: tokens.shopName,
+        shopUrl: verified.shopUrl,
+      },
       'OXID OAuth completed, integration active',
     );
 

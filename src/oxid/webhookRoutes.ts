@@ -36,8 +36,8 @@ oxidWebhookRouter.post(
 
     const verification = verifyOxidSignature({
       rawBody: rawBodyOf(req),
-      signature: req.get('x-oxid-signature'),
-      timestamp: req.get('x-oxid-timestamp'),
+      signature: req.get('x-mwv-signature'),
+      timestamp: req.get('x-mwv-timestamp'),
       secret: oxidWebhookSecret(integration),
     });
 
@@ -105,8 +105,8 @@ oxidWebhookRouter.post(
 
     const verification = verifyOxidSignature({
       rawBody: rawBodyOf(req),
-      signature: req.get('x-oxid-signature'),
-      timestamp: req.get('x-oxid-timestamp'),
+      signature: req.get('x-mwv-signature'),
+      timestamp: req.get('x-mwv-timestamp'),
       secret: oxidWebhookSecret(integration),
     });
 

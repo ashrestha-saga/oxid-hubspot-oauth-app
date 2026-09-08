@@ -54,6 +54,7 @@ function baseIntegrationRow(partial: Partial<IntegrationRow>): IntegrationRow {
     hubspotRefreshToken: null,
     hubspotTokenExpiresAt: null,
     oxidShopId: null,
+    oxidShopName: null,
     oxidBaseUrl: null,
     oxidOAuthClientId: null,
     oxidOAuthClientSecret: null,
@@ -180,6 +181,7 @@ export const fakeIntegrationsRepo = {
     id: string,
     input: {
       oxidShopId: string;
+      oxidShopName?: string | null;
       oxidBaseUrl: string;
       clientId: string;
       clientSecret: string;
@@ -192,6 +194,9 @@ export const fakeIntegrationsRepo = {
     const row = state.integrations.find((entry) => entry.id === id);
     if (!row) throw new Error(`no integration ${id}`);
     row.oxidShopId = input.oxidShopId;
+    if (input.oxidShopName !== undefined) {
+      row.oxidShopName = input.oxidShopName;
+    }
     row.oxidBaseUrl = input.oxidBaseUrl;
     row.oxidOAuthClientId = encrypt(input.clientId);
     row.oxidOAuthClientSecret = encrypt(input.clientSecret);
@@ -281,13 +286,39 @@ export const fakeEntityMappingsRepo = {
     integrationId: string;
     hubspotContactId?: string | null;
     oxidCustomerId?: string | null;
+    oxidRecordId?: string | null;
   }) {
     const now = new Date();
+    // Simulate unique constraints used in production.
+    if (input.hubspotContactId) {
+      const clash = state.mappings.find(
+        (row) =>
+          row.integrationId === input.integrationId &&
+          row.hubspotContactId === input.hubspotContactId,
+      );
+      if (clash) {
+        const err = new Error('Unique constraint failed') as Error & { code: string };
+        err.code = 'P2002';
+        throw err;
+      }
+    }
+    if (input.oxidCustomerId) {
+      const clash = state.mappings.find(
+        (row) =>
+          row.integrationId === input.integrationId && row.oxidCustomerId === input.oxidCustomerId,
+      );
+      if (clash) {
+        const err = new Error('Unique constraint failed') as Error & { code: string };
+        err.code = 'P2002';
+        throw err;
+      }
+    }
     const row: EntityMappingRow = {
       id: randomUUID(),
       integrationId: input.integrationId,
       hubspotContactId: input.hubspotContactId ?? null,
       oxidCustomerId: input.oxidCustomerId ?? null,
+      oxidRecordId: input.oxidRecordId ?? null,
       lastSyncedAt: null,
       lastSyncedHash: null,
       sourceOfLastWrite: null,
@@ -297,16 +328,80 @@ export const fakeEntityMappingsRepo = {
     state.mappings.push(row);
     return row;
   },
+  async mergeMappings(integrationId: string, keepId: string, absorbId: string) {
+    if (keepId === absorbId) {
+      const same = await fakeEntityMappingsRepo.findById(integrationId, keepId);
+      if (!same) throw new Error(`entity mapping ${keepId} not found`);
+      return same;
+    }
+    const keep = await fakeEntityMappingsRepo.findById(integrationId, keepId);
+    const absorb = await fakeEntityMappingsRepo.findById(integrationId, absorbId);
+    if (!keep || !absorb) throw new Error(`cannot merge mappings ${keepId} <- ${absorbId}`);
+
+    keep.hubspotContactId = keep.hubspotContactId ?? absorb.hubspotContactId;
+    keep.oxidCustomerId = keep.oxidCustomerId ?? absorb.oxidCustomerId;
+    keep.oxidRecordId = keep.oxidRecordId ?? absorb.oxidRecordId;
+    keep.lastSyncedAt = keep.lastSyncedAt ?? absorb.lastSyncedAt;
+    keep.lastSyncedHash = keep.lastSyncedHash ?? absorb.lastSyncedHash;
+    keep.sourceOfLastWrite = keep.sourceOfLastWrite ?? absorb.sourceOfLastWrite;
+    keep.updatedAt = new Date();
+
+    state.mappings = state.mappings.filter((row) => row.id !== absorb.id);
+    return keep;
+  },
   async linkCounterpart(
     integrationId: string,
     id: string,
-    input: { hubspotContactId?: string | null; oxidCustomerId?: string | null },
+    input: {
+      hubspotContactId?: string | null;
+      oxidCustomerId?: string | null;
+      oxidRecordId?: string | null;
+    },
   ) {
     const row = await fakeEntityMappingsRepo.findById(integrationId, id);
-    if (!row) return 0;
-    if (input.hubspotContactId !== undefined) row.hubspotContactId = input.hubspotContactId;
-    if (input.oxidCustomerId !== undefined) row.oxidCustomerId = input.oxidCustomerId;
-    return 1;
+    if (!row) throw new Error(`entity mapping ${id} not found`);
+
+    let keep = row;
+    if (input.oxidCustomerId) {
+      const other = state.mappings.find(
+        (entry) =>
+          entry.integrationId === integrationId &&
+          entry.id !== keep.id &&
+          entry.oxidCustomerId === input.oxidCustomerId,
+      );
+      if (other) keep = await fakeEntityMappingsRepo.mergeMappings(integrationId, keep.id, other.id);
+    }
+    if (input.hubspotContactId) {
+      const other = state.mappings.find(
+        (entry) =>
+          entry.integrationId === integrationId &&
+          entry.id !== keep.id &&
+          entry.hubspotContactId === input.hubspotContactId,
+      );
+      if (other) keep = await fakeEntityMappingsRepo.mergeMappings(integrationId, keep.id, other.id);
+    }
+    if (input.oxidRecordId) {
+      const other = state.mappings.find(
+        (entry) =>
+          entry.integrationId === integrationId &&
+          entry.id !== keep.id &&
+          entry.oxidRecordId === input.oxidRecordId,
+      );
+      if (other) keep = await fakeEntityMappingsRepo.mergeMappings(integrationId, keep.id, other.id);
+    }
+
+    if (input.hubspotContactId !== undefined) keep.hubspotContactId = input.hubspotContactId;
+    if (input.oxidCustomerId !== undefined) keep.oxidCustomerId = input.oxidCustomerId;
+    if (input.oxidRecordId !== undefined) keep.oxidRecordId = input.oxidRecordId;
+    keep.updatedAt = new Date();
+    return keep;
+  },
+  async findByOxidRecordId(integrationId: string, oxidRecordId: string) {
+    return (
+      state.mappings.find(
+        (row) => row.integrationId === integrationId && row.oxidRecordId === oxidRecordId,
+      ) ?? null
+    );
   },
   async recordSync(
     integrationId: string,

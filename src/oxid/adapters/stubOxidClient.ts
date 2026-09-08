@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { IntegrationRow } from '../../db/repositories/integrations';
 import { logger } from '../../lib/logger';
+import type { CanonicalContact } from '../../sync/fieldMap';
+import { toOxidInputWithMap, type TenantFieldMap } from '../../sync/tenantFieldMap';
 import type { OxidClient, OxidCustomer, OxidCustomerInput } from '../client';
 
 /**
@@ -32,6 +34,28 @@ export class StubOxidClient implements OxidClient {
 
   constructor(integration: IntegrationRow | { id: string }) {
     this.integrationId = integration.id;
+  }
+
+  async upsertCustomerByEmail(
+    email: string,
+    contact: CanonicalContact,
+    map: TenantFieldMap,
+    options?: { oxidRecordId?: string | null },
+  ): Promise<OxidCustomer> {
+    const input = toOxidInputWithMap(contact, map);
+    const normalized = normalizeEmail(email);
+    const oxidRecordId = options?.oxidRecordId?.trim();
+    if (oxidRecordId) {
+      const byId = await this.getCustomer(oxidRecordId);
+      if (byId) {
+        return this.updateCustomer(byId.id, { ...input, email: normalized });
+      }
+    }
+    const existing = await this.findCustomerByEmail(normalized);
+    if (existing) {
+      return this.updateCustomer(existing.id, { ...input, email: normalized });
+    }
+    return this.createCustomer({ ...input, email: normalized });
   }
 
   async findCustomerByEmail(email: string): Promise<OxidCustomer | null> {

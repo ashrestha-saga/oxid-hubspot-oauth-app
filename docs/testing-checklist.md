@@ -77,8 +77,8 @@ Requires MWV API OAuth enabled on the shop (see [API_DOCUMENTATION.md](../../API
 ```bash
 curl -i -X POST "$BASE_URL/webhooks/oxid/<oxid_shop_id>" \
   -H 'Content-Type: application/json' \
-  -H "X-Oxid-Timestamp: $(($(date +%s) * 1000))" \
-  -H 'X-Oxid-Signature: sha256=deadbeef' \
+  -H "X-MWV-Timestamp: $(date +%s)" \
+  -H 'X-MWV-Signature: sha256=deadbeef' \
   --data-raw '{"customer":{"id":"c-1","email":"a@b.de"}}'          # expect 401
 
 curl -i -X POST "$BASE_URL/webhooks/oxid/not-a-real-shop" ...       # expect 404

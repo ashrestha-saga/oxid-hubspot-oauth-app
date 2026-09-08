@@ -58,6 +58,7 @@ settingsRouter.get(
       connected: oxidConnected,
       oxidConnected,
       oxidShopId: integration.oxidShopId,
+      shopName: integration.oxidShopName,
       shopUrl: integration.oxidBaseUrl,
       mappingStatus: integration.mappingStatus,
       map,
@@ -142,11 +143,13 @@ settingsRouter.get(
       logger.warn({ err: error, integrationId: integration.id }, 'settings: list properties failed');
       const map = defaultTenantFieldMap();
       res.json({
-        properties: map.fields.map((field) => ({
-          name: field.hubspotProperty,
-          label: field.hubspotProperty,
-          type: 'string',
-        })),
+        properties: map.fields
+          .filter((field) => field.hubspotProperty)
+          .map((field) => ({
+            name: field.hubspotProperty!,
+            label: field.hubspotProperty!,
+            type: 'string',
+          })),
         fallback: true,
       });
     }

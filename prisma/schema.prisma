@@ -3,16 +3,15 @@
 // Every credential column marked "encrypted" holds the output of
 // src/lib/crypto.ts (AES-256-GCM, `v1:iv:tag:ciphertext`), never plaintext.
 //
-// Local dev uses SQLite (file:./prisma/dev.db). For production Postgres, switch
-// provider to "postgresql", restore @db.Uuid / @db.Timestamptz where needed, and
-// regenerate migrations.
+// MySQL via hosting (phpMyAdmin). User is @localhost — from your Mac you need
+// an SSH tunnel or remote MySQL; on the same server use 127.0.0.1.
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "mysql"
   url      = env("DATABASE_URL")
 }
 
@@ -22,23 +21,25 @@ model Integration {
   name String?
 
   hubspotPortalId       BigInt?   @unique @map("hubspot_portal_id")
-  hubspotAccessToken    String?   @map("hubspot_access_token") // encrypted
-  hubspotRefreshToken   String?   @map("hubspot_refresh_token") // encrypted
+  hubspotAccessToken    String?   @db.Text @map("hubspot_access_token") // encrypted
+  hubspotRefreshToken   String?   @db.Text @map("hubspot_refresh_token") // encrypted
   hubspotTokenExpiresAt DateTime? @map("hubspot_token_expires_at")
 
   oxidShopId              String?   @unique @map("oxid_shop_id")
-  oxidBaseUrl             String?   @map("oxid_base_url")
-  oxidOAuthClientId       String?   @map("oxid_oauth_client_id") // encrypted
-  oxidOAuthClientSecret   String?   @map("oxid_oauth_client_secret") // encrypted
-  oxidAccessToken         String?   @map("oxid_access_token") // encrypted
-  oxidRefreshToken        String?   @map("oxid_refresh_token") // encrypted
+  /// Display name from OXID token response (`shop_name`).
+  oxidShopName            String?   @map("oxid_shop_name")
+  oxidBaseUrl             String?   @db.Text @map("oxid_base_url")
+  oxidOAuthClientId       String?   @db.Text @map("oxid_oauth_client_id") // encrypted
+  oxidOAuthClientSecret   String?   @db.Text @map("oxid_oauth_client_secret") // encrypted
+  oxidAccessToken         String?   @db.Text @map("oxid_access_token") // encrypted
+  oxidRefreshToken        String?   @db.Text @map("oxid_refresh_token") // encrypted
   oxidTokenExpiresAt      DateTime? @map("oxid_token_expires_at")
-  oxidWebhookSecret       String?   @map("oxid_webhook_secret") // encrypted
+  oxidWebhookSecret       String?   @db.Text @map("oxid_webhook_secret") // encrypted
 
   /// Per-tenant OXID↔HubSpot field map (JSON). Null = built-in standard map.
-  fieldMappingJson   String?   @map("field_mapping_json")
+  fieldMappingJson   String?   @db.Text @map("field_mapping_json")
   /// Last sample payload captured during mapping setup (JSON).
-  samplePayloadJson  String?   @map("sample_payload_json")
+  samplePayloadJson  String?   @db.Text @map("sample_payload_json")
   /// default | custom — whether the merchant confirmed a map (or accepted defaults).
   mappingStatus      String    @default("default") @map("mapping_status")
 
@@ -62,7 +63,10 @@ model EntityMapping {
   integrationId String @map("integration_id")
 
   hubspotContactId String? @map("hubspot_contact_id")
+  /** Normalized email — cross-system record key stored in oxid_customer_id. */
   oxidCustomerId   String? @map("oxid_customer_id")
+  /// OXID object id (`oxid` from User API). Stored for future update-by-id; not sent on writes yet.
+  oxidRecordId     String? @map("oxid_record_id")
 
   lastSyncedAt      DateTime? @map("last_synced_at")
   /// Hash of the mapped field values as last written. Equal hash => nothing to do.
@@ -76,11 +80,12 @@ model EntityMapping {
   integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
   syncEvents  SyncEvent[]
 
-  // SQLite (like Postgres) treats NULLs as distinct in unique indexes, so these
+  // MySQL unique indexes treat NULLs as distinct (like Postgres), so these
   // allow many half-mapped rows per tenant while still preventing two mappings
   // for the same remote record.
   @@unique([integrationId, hubspotContactId])
   @@unique([integrationId, oxidCustomerId])
+  @@unique([integrationId, oxidRecordId])
   @@index([integrationId])
   @@map("entity_mappings")
 }
@@ -122,7 +127,7 @@ model SyncJob {
   runAfter  DateTime @default(now()) @map("run_after")
   lockedAt  DateTime? @map("locked_at")
   lockedBy  String?   @map("locked_by")
-  lastError String?   @map("last_error")
+  lastError String?   @db.Text @map("last_error")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

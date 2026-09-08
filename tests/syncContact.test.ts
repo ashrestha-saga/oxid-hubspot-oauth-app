@@ -1,6 +1,6 @@
 import './helpers/mocks';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { addIntegration, fakeState, resetFakeDb } from './helpers/fakeDb';
+import { addIntegration, fakeEntityMappingsRepo, fakeState, resetFakeDb } from './helpers/fakeDb';
 import { fakeHubspotStore, resetFakeHubspot, seedFakeHubspotContact } from './helpers/fakeHubspot';
 import { resetStubOxidStore, seedStubCustomer, stubCustomers } from '../src/oxid/adapters/stubOxidClient';
 import { resetOxidClientFactory } from '../src/oxid/client';
@@ -34,7 +34,7 @@ describe('syncContact: OXID -> HubSpot', () => {
     const result = await syncContact({
       integrationId: integration.id,
       direction: 'oxid_to_hubspot',
-      sourceRecord: { id: customer.id, fields: customer },
+      sourceRecord: { id: customer.email!, fields: customer },
     });
 
     expect(result.status).toBe('success');
@@ -51,7 +51,7 @@ describe('syncContact: OXID -> HubSpot', () => {
     expect(fakeState.mappings).toHaveLength(1);
     expect(fakeState.mappings[0]).toMatchObject({
       integrationId: integration.id,
-      oxidCustomerId: 'oxid-1',
+      oxidCustomerId: 'kunde@example.com',
       hubspotContactId: store.contacts[0]?.id,
       sourceOfLastWrite: 'oxid',
     });
@@ -66,7 +66,7 @@ describe('syncContact: OXID -> HubSpot', () => {
     await syncContact({
       integrationId: integration.id,
       direction: 'oxid_to_hubspot',
-      sourceRecord: { id: customer.id, fields: customer },
+      sourceRecord: { id: customer.email!, fields: customer },
     });
 
     const store = fakeHubspotStore(integration.id);
@@ -77,7 +77,7 @@ describe('syncContact: OXID -> HubSpot', () => {
 
   it('skips a redelivery of the same payload without writing', async () => {
     const integration = addIntegration({ portalId: 113 });
-    const sourceRecord = { id: customer.id, fields: customer };
+    const sourceRecord = { id: customer.email!, fields: customer };
 
     await syncContact({ integrationId: integration.id, direction: 'oxid_to_hubspot', sourceRecord });
     const writesAfterFirst = fakeHubspotStore(integration.id).writes;
@@ -98,13 +98,13 @@ describe('syncContact: OXID -> HubSpot', () => {
     await syncContact({
       integrationId: integration.id,
       direction: 'oxid_to_hubspot',
-      sourceRecord: { id: customer.id, fields: customer },
+      sourceRecord: { id: customer.email!, fields: customer },
     });
 
     const result = await syncContact({
       integrationId: integration.id,
       direction: 'oxid_to_hubspot',
-      sourceRecord: { id: customer.id, fields: { ...customer, phone: '+49 30 999999' } },
+      sourceRecord: { id: customer.email!, fields: { ...customer, phone: '+49 30 999999' } },
     });
 
     expect(result.status).toBe('success');
@@ -181,6 +181,53 @@ describe('syncContact: HubSpot -> OXID', () => {
     expect(customers).toHaveLength(1);
     expect(customers[0]).toMatchObject({ id: 'oxid-existing', firstName: 'Neu' });
   });
+
+  it('merges duplicate half-mapped rows instead of failing on unique oxid email', async () => {
+    const integration = addIntegration({ portalId: 124 });
+    const contact = seedFakeHubspotContact(integration.id, {
+      properties: {
+        email: 'dup@example.com',
+        firstname: 'Dup',
+        lastname: 'User',
+      },
+    });
+
+    // Simulate the broken state from the production logs: one row for HubSpot id,
+    // another already claiming the same email.
+    await fakeEntityMappingsRepo.create({
+      integrationId: integration.id,
+      hubspotContactId: contact.id,
+    });
+    await fakeEntityMappingsRepo.create({
+      integrationId: integration.id,
+      oxidCustomerId: 'dup@example.com',
+      oxidRecordId: 'oxid-already',
+    });
+    seedStubCustomer(integration.id, {
+      id: 'oxid-already',
+      email: 'dup@example.com',
+      firstName: 'Old',
+      lastName: 'Name',
+      phone: null,
+      updatedAt: new Date().toISOString(),
+    });
+
+    const result = await syncContact({
+      integrationId: integration.id,
+      direction: 'hubspot_to_oxid',
+      sourceRecord: { id: contact.id },
+    });
+
+    expect(result.status).toBe('success');
+    expect(fakeState.mappings).toHaveLength(1);
+    expect(fakeState.mappings[0]).toMatchObject({
+      hubspotContactId: contact.id,
+      oxidCustomerId: 'dup@example.com',
+      oxidRecordId: 'oxid-already',
+    });
+    expect(stubCustomers(integration.id)).toHaveLength(1);
+    expect(stubCustomers(integration.id)[0]?.firstName).toBe('Dup');
+  });
 });
 
 describe('syncContact: loop suppression across directions', () => {
@@ -191,7 +238,7 @@ describe('syncContact: loop suppression across directions', () => {
     await syncContact({
       integrationId: integration.id,
       direction: 'oxid_to_hubspot',
-      sourceRecord: { id: customer.id, fields: customer },
+      sourceRecord: { id: customer.email!, fields: customer },
     });
 
     const contactId = fakeState.mappings[0]?.hubspotContactId as string;
@@ -221,7 +268,7 @@ describe('syncContact: loop suppression across directions', () => {
     await syncContact({
       integrationId: integration.id,
       direction: 'oxid_to_hubspot',
-      sourceRecord: { id: customer.id, fields: customer },
+      sourceRecord: { id: customer.email!, fields: customer },
     });
 
     expect(fakeState.mappings[0]?.lastSyncedHash).toBe(
@@ -255,7 +302,7 @@ describe('syncContact: guards', () => {
     const result = await syncContact({
       integrationId: integration.id,
       direction: 'oxid_to_hubspot',
-      sourceRecord: { id: customer.id, fields: customer, deleted: true },
+      sourceRecord: { id: customer.email!, fields: customer, deleted: true },
     });
 
     expect(result.status).toBe('skipped_unsupported');
@@ -269,7 +316,7 @@ describe('syncContact: guards', () => {
       syncContact({
         integrationId: integration.id,
         direction: 'oxid_to_hubspot',
-        sourceRecord: { id: customer.id, fields: customer },
+        sourceRecord: { id: customer.email!, fields: customer },
       }),
     ).rejects.toThrow(/not active/);
   });
@@ -307,7 +354,7 @@ describe('syncContact: multi-tenant isolation', () => {
     await syncContact({
       integrationId: tenantA.id,
       direction: 'oxid_to_hubspot',
-      sourceRecord: { id: 'oxid-1', fields: customer },
+      sourceRecord: { id: customer.email!, fields: customer },
     });
 
     expect(fakeHubspotStore(tenantA.id).contacts).toHaveLength(1);

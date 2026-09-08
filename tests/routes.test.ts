@@ -78,15 +78,15 @@ function postOxidWebhook(
   body: string,
   options: { secret?: string; timestamp?: string; signature?: string } = {},
 ) {
-  const timestamp = options.timestamp ?? String(Date.now());
+  const timestamp = options.timestamp ?? String(Math.floor(Date.now() / 1000));
   const signature =
     options.signature ?? oxidSignatureFor(body, timestamp, options.secret ?? SHOP_SECRET);
 
   return request(app)
     .post(`/webhooks/oxid/${shopId}`)
     .set('Content-Type', 'application/json')
-    .set('X-Oxid-Timestamp', timestamp)
-    .set('X-Oxid-Signature', signature)
+    .set('X-MWV-Timestamp', timestamp)
+    .set('X-MWV-Signature', signature)
     .send(body);
 }
 
@@ -147,7 +147,7 @@ describe('POST /webhooks/oxid/:oxidShopId', () => {
     expect(fakeState.jobs[0]).toMatchObject({
       integrationId: integration.id,
       direction: 'oxid_to_hubspot',
-      dedupeKey: 'oxid_to_hubspot:oxid-1',
+      dedupeKey: 'oxid_to_hubspot:kunde@example.com',
       status: 'pending',
     });
   });
@@ -162,9 +162,9 @@ describe('POST /webhooks/oxid/:oxidShopId', () => {
     expect(fakeState.jobs[0]).toMatchObject({
       integrationId: integration.id,
       direction: 'oxid_to_hubspot',
-      dedupeKey: 'oxid_to_hubspot:66666692',
+      dedupeKey: 'oxid_to_hubspot:j.smith02@merzljak.de',
       payload: {
-        id: '66666692',
+        id: 'j.smith02@merzljak.de',
         fields: {
           email: 'j.smith02@merzljak.de',
           firstName: 'Jane02',
@@ -224,14 +224,14 @@ describe('POST /webhooks/oxid/:oxidShopId', () => {
     addIntegration({ portalId: 505, oxidShopId: 'shop-505' });
 
     const signed = oxidBody();
-    const timestamp = String(Date.now());
+    const timestamp = String(Math.floor(Date.now() / 1000));
     const signature = oxidSignatureFor(signed, timestamp, SHOP_SECRET);
 
     const response = await request(app)
       .post('/webhooks/oxid/shop-505')
       .set('Content-Type', 'application/json')
-      .set('X-Oxid-Timestamp', timestamp)
-      .set('X-Oxid-Signature', signature)
+      .set('X-MWV-Timestamp', timestamp)
+      .set('X-MWV-Signature', signature)
       .send(signed.replace('Anna', 'Bert'));
 
     expect(response.status).toBe(401);
@@ -241,7 +241,7 @@ describe('POST /webhooks/oxid/:oxidShopId', () => {
     addIntegration({ portalId: 506, oxidShopId: 'shop-506' });
 
     const response = await postOxidWebhook('shop-506', oxidBody(), {
-      timestamp: String(Date.now() - 10 * 60 * 1000),
+      timestamp: String(Math.floor(Date.now() / 1000) - 10 * 60),
     });
 
     expect(response.status).toBe(401);
@@ -265,12 +265,12 @@ describe('POST /webhooks/oxid/:oxidShopId', () => {
     expect(response.status).toBe(400);
   });
 
-  it('rejects a payload without a customer id', async () => {
+  it('rejects a raw users payload without email', async () => {
     addIntegration({ portalId: 510, oxidShopId: 'shop-510' });
 
     const response = await postOxidWebhook(
       'shop-510',
-      JSON.stringify({ customer: { email: 'x@example.com' } }),
+      JSON.stringify({ users: { oxfname: 'NoEmail' } }),
     );
 
     expect(response.status).toBe(400);
@@ -291,9 +291,9 @@ describe('POST /webhooks/hubspot', () => {
     const integration = addIntegration({ portalId: 600 });
 
     const response = await postHubspotWebhook([
-      { portalId: 600, objectId: 12345, subscriptionType: 'contact.propertyChange' },
-      { portalId: 600, objectId: 12345, subscriptionType: 'contact.propertyChange' },
-      { portalId: 600, objectId: 67890, subscriptionType: 'contact.propertyChange' },
+      { portalId: 600, objectId: 12345, subscriptionType: 'contact.propertyChange', propertyName: 'email' },
+      { portalId: 600, objectId: 12345, subscriptionType: 'contact.propertyChange', propertyName: 'firstname' },
+      { portalId: 600, objectId: 67890, subscriptionType: 'contact.propertyChange', propertyName: 'lastname' },
     ]);
 
     expect(response.status).toBe(200);
@@ -305,6 +305,45 @@ describe('POST /webhooks/hubspot', () => {
       'hubspot_to_oxid:67890',
     ]);
     expect(fakeState.jobs[0]?.integrationId).toBe(integration.id);
+  });
+
+  it('queues object.creation for new contacts', async () => {
+    addIntegration({ portalId: 603 });
+
+    const response = await postHubspotWebhook([
+      {
+        portalId: 603,
+        objectId: 555,
+        subscriptionType: 'object.creation',
+        objectTypeId: '0-1',
+      },
+    ]);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ received: 1, queued: 1, ignored: 0 });
+    expect(fakeState.jobs).toHaveLength(1);
+    expect(fakeState.jobs[0]).toMatchObject({
+      direction: 'hubspot_to_oxid',
+      dedupeKey: 'hubspot_to_oxid:555',
+    });
+  });
+
+  it('ignores property changes outside the watched mapped set', async () => {
+    addIntegration({ portalId: 604 });
+
+    const response = await postHubspotWebhook([
+      {
+        portalId: 604,
+        objectId: 1,
+        subscriptionType: 'object.propertyChange',
+        objectTypeId: '0-1',
+        propertyName: 'hs_lead_status',
+      },
+    ]);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ received: 1, queued: 0, ignored: 1 });
+    expect(fakeState.jobs).toHaveLength(0);
   });
 
   it('returns 401 for an invalid signature', async () => {
@@ -483,6 +522,8 @@ describe('OXID OAuth flow', () => {
                 access_token: 'oxid-access',
                 refresh_token: 'oxid-refresh',
                 expires_in: 3600,
+                shop_id: '1',
+                shop_name: 'My OXID Shop',
               }),
           } as Response;
         }
@@ -524,7 +565,8 @@ describe('OXID OAuth flow', () => {
     expect(stored?.oxidBaseUrl).toBe('https://shop.example.com');
     expect(stored?.oxidRefreshToken).toMatch(/^v1:/);
     expect(stored?.oxidWebhookSecret).toMatch(/^v1:/);
-    expect(stored?.oxidShopId).toBeTruthy();
+    expect(stored?.oxidShopId).toBe('1');
+    expect(stored?.oxidShopName).toBe('My OXID Shop');
   });
 
   it('rejects OXID OAuth callback with invalid state', async () => {

@@ -27,12 +27,14 @@ describe('field mapping', () => {
       email: 'a.user@example.com',
       firstName: 'Anna',
       lastName: 'Beispiel',
+      salutation: null,
       phone: null,
       company: null,
       address: null,
       city: null,
       zip: null,
       country: null,
+      oxidId: null,
     });
   });
 
@@ -50,12 +52,14 @@ describe('field mapping', () => {
       email: 'kunde@example.com',
       firstName: 'Bert',
       lastName: null,
+      salutation: null,
       phone: '030111',
       company: null,
       address: null,
       city: null,
       zip: null,
       country: null,
+      oxidId: null,
     });
   });
 
@@ -88,6 +92,8 @@ describe('field mapping', () => {
     expect(hubspotReadProperties).toContain('city');
     expect(hubspotReadProperties).toContain('zip');
     expect(hubspotReadProperties).toContain('country');
+    expect(hubspotReadProperties).toContain('salutation');
+    expect(hubspotReadProperties).not.toContain('oxid_id');
     expect(hubspotReadProperties).toContain('lastmodifieddate');
     expect(new Set(hubspotReadProperties).size).toBe(hubspotReadProperties.length);
   });

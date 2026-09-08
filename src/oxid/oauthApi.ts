@@ -7,6 +7,10 @@ export interface OxidTokenResponse {
   refreshToken: string;
   expiresAt: Date;
   scope: string | null;
+  /** OXID shop id from the token response — used as the webhook path segment. */
+  shopId: string | null;
+  /** Human-readable shop name from the token response. */
+  shopName: string | null;
 }
 
 export interface OxidProfile {
@@ -76,13 +80,26 @@ async function postTokenRequest(
     refresh_token: string;
     expires_in: number;
     scope?: string;
+    shop_id?: string | number;
+    shop_name?: string;
   };
+
+  const shopId =
+    body.shop_id === undefined || body.shop_id === null
+      ? null
+      : String(body.shop_id).trim() || null;
+  const shopName =
+    typeof body.shop_name === 'string' && body.shop_name.trim().length > 0
+      ? body.shop_name.trim()
+      : null;
 
   return {
     accessToken: body.access_token,
     refreshToken: body.refresh_token,
     expiresAt: new Date(Date.now() + body.expires_in * 1000),
     scope: body.scope ?? null,
+    shopId,
+    shopName,
   };
 }
 

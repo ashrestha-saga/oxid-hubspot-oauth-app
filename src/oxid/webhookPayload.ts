@@ -1,11 +1,12 @@
 import { z } from 'zod';
-import { type CanonicalContact } from '../sync/fieldMap';
+import { type CanonicalContact, emailOf } from '../sync/fieldMap';
 import {
   canonicalFromOxidCustomer,
   canonicalFromOxidUser,
   defaultTenantFieldMap,
   type TenantFieldMap,
 } from '../sync/tenantFieldMap';
+import { pickNeedfulOxidUser } from './fromOxidUserWebhook';
 import type { SourceRecord } from '../sync/syncContact';
 
 const webhookEventSchema = z.enum([
@@ -20,8 +21,8 @@ export const oxidWebhookNormalizedSchema = z.object({
   occurredAt: z.string().optional(),
   shopId: z.string().optional(),
   customer: z.object({
-    id: z.string().min(1),
-    email: z.string().nullish(),
+    id: z.string().optional(),
+    email: z.string().min(1),
     firstName: z.string().nullish(),
     lastName: z.string().nullish(),
     phone: z.string().nullish(),
@@ -42,10 +43,30 @@ export const oxidRawUserSchema = z
     oxusername: z.string().nullish(),
     oxfname: z.string().nullish(),
     oxlname: z.string().nullish(),
+    oxsal: z.string().nullish(),
+    salutation: z
+      .object({
+        id: z.string().nullish(),
+        title: z.string().nullish(),
+        title_1: z.string().nullish(),
+      })
+      .passthrough()
+      .nullish(),
     oxfon: z.string().nullish(),
     oxcreate: z.string().nullish(),
     oxtimestamp: z.string().nullish(),
+    oxaddress: z.array(z.record(z.unknown())).nullish(),
     child_ids: z
+      .array(
+        z
+          .object({
+            oxid: z.string().nullish(),
+            oxfon: z.string().nullish(),
+          })
+          .passthrough(),
+      )
+      .nullish(),
+    deliveryAddress: z
       .array(
         z
           .object({
@@ -59,14 +80,10 @@ export const oxidRawUserSchema = z
   .passthrough()
   .refine(
     (user) => {
-      const oxid = typeof user.oxid === 'string' ? user.oxid.trim() : '';
-      const mcustnr =
-        user.mcustnr !== null && user.mcustnr !== undefined
-          ? String(user.mcustnr).trim()
-          : '';
-      return oxid.length > 0 || mcustnr.length > 0;
+      const email = typeof user.oxusername === 'string' ? user.oxusername.trim() : '';
+      return email.length > 0;
     },
-    { message: 'users must include oxid or mcustnr' },
+    { message: 'users must include oxusername (email)' },
   );
 
 export const oxidWebhookRawUsersSchema = z.object({
@@ -144,8 +161,12 @@ export function sourceRecordFromWebhook(
   if (parsed.format === 'normalized') {
     const customer = parsed.payload.customer as Record<string, unknown>;
     const fields: CanonicalContact = canonicalFromOxidCustomer(customer, map);
+    const id = emailOf(fields);
+    if (!id) {
+      throw new Error('normalized OXID customer payload requires email');
+    }
     return {
-      id: parsed.payload.customer.id,
+      id,
       fields,
       rawOxid: customer,
       deleted: event === 'customer.deleted',
@@ -154,12 +175,13 @@ export function sourceRecordFromWebhook(
 
   const users =
     parsed.format === 'raw_users' ? parsed.payload.users : parsed.payload.users;
-  const mapped = canonicalFromOxidUser(users as Record<string, unknown>, map);
+  const needful = pickNeedfulOxidUser(users as Record<string, unknown>);
+  const mapped = canonicalFromOxidUser(needful, map);
 
   return {
     id: mapped.id,
     fields: mapped.fields,
-    rawOxid: users as Record<string, unknown>,
+    rawOxid: needful,
     deleted: event === 'customer.deleted',
   };
 }

@@ -26,6 +26,7 @@ export interface OxidOAuthCredentialsInput {
 
 export interface OxidOAuthCompleteInput {
   oxidShopId: string;
+  oxidShopName?: string | null;
   oxidBaseUrl: string;
   clientId: string;
   clientSecret: string;
@@ -106,6 +107,7 @@ export const integrationsRepo = {
       where: { id },
       data: {
         oxidShopId: input.oxidShopId,
+        ...(input.oxidShopName !== undefined ? { oxidShopName: input.oxidShopName } : {}),
         oxidBaseUrl: input.oxidBaseUrl,
         oxidOAuthClientId: encrypt(input.clientId),
         oxidOAuthClientSecret: encrypt(input.clientSecret),

@@ -54,7 +54,7 @@ describe('reconcileIntegration', () => {
     await reconcileIntegration(integration);
 
     expect(fakeState.jobs[0]?.payload).toMatchObject({
-      id: 'oxid-2',
+      id: 'shop2@example.com',
       fields: { email: 'shop2@example.com', firstName: 'Anna' },
     });
   });
@@ -65,7 +65,7 @@ describe('reconcileIntegration', () => {
 
     const mapping = await fakeEntityMappingsRepo.create({
       integrationId: integration.id,
-      oxidCustomerId: 'oxid-3',
+      oxidCustomerId: 'known@example.com',
     });
     await fakeEntityMappingsRepo.recordSync(integration.id, mapping.id, {
       hash: contactHash({
@@ -90,7 +90,7 @@ describe('reconcileIntegration', () => {
 
     const mapping = await fakeEntityMappingsRepo.create({
       integrationId: integration.id,
-      oxidCustomerId: 'oxid-4',
+      oxidCustomerId: 'drift@example.com',
     });
     await fakeEntityMappingsRepo.recordSync(integration.id, mapping.id, {
       hash: 'a-stale-hash',

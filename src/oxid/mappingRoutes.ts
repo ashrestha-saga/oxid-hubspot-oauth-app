@@ -57,6 +57,7 @@ oxidMappingRouter.get(
         state: isOxidOAuthConnected(integration) ? 'ready' : 'need_pairing',
         portalId: session.portalId,
         shopUrl: integration.oxidBaseUrl,
+        shopName: integration.oxidShopName,
         oxidShopId: integration.oxidShopId,
         mappingStatus: integration.mappingStatus,
         installUrl: '/oauth/install',
@@ -87,6 +88,7 @@ oxidMappingRouter.get(
       status: integration.status,
       mappingStatus: integration.mappingStatus,
       oxidShopId: integration.oxidShopId,
+      shopName: integration.oxidShopName,
       shopUrl: integration.oxidBaseUrl,
       probeUrl: integration.oxidShopId
         ? `${env.BASE_URL}/webhooks/oxid/${integration.oxidShopId}/probe`
@@ -119,11 +121,13 @@ oxidMappingRouter.get(
       // Fall back to the standard contact properties so the wizard still works offline.
       const map = defaultTenantFieldMap();
       res.json({
-        properties: map.fields.map((field) => ({
-          name: field.hubspotProperty,
-          label: field.hubspotProperty,
-          type: 'string',
-        })),
+        properties: map.fields
+          .filter((field) => field.hubspotProperty)
+          .map((field) => ({
+            name: field.hubspotProperty!,
+            label: field.hubspotProperty!,
+            type: 'string',
+          })),
         fallback: true,
       });
     }

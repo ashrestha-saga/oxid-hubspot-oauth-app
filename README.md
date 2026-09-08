@@ -61,12 +61,17 @@ v3 signature is computed over the full request URI, so a mismatch here shows up 
 2. Redirect URL: `${BASE_URL}/oauth/callback`.
 3. Scopes: `crm.objects.contacts.read`, `crm.objects.contacts.write`, `oauth`.
 4. Copy client id/secret and the numeric app id into `.env`.
-5. Register the webhook subscription (target URL `${BASE_URL}/webhooks/hubspot`, event
-   `contact.propertyChange`) either in the developer portal UI or with:
+5. Register HubSpot webhook subscriptions (target URL `${BASE_URL}/webhooks/hubspot`):
 
-```bash
-npm run hubspot:webhooks
-```
+   - `object.creation` for contacts (new contact → sync to OXID)
+   - `object.propertyChange` for each mapped contact property (email, firstname, …)
+
+   ```bash
+   npm run hubspot:webhooks
+   ```
+
+   Requires `HUBSPOT_APP_ID` and `HUBSPOT_DEVELOPER_API_KEY` in `.env`. Re-run when the tunnel URL changes.
+   The HubSpot developer project also ships a `webhooks` component (`oxid-hubspot-app/src/app/webhooks/`) that declares the same subscriptions on upload.
 
 ## Running
 
@@ -106,7 +111,7 @@ npm run typecheck
 | `/api/settings/status`         | GET    | HubSpot Settings: status + webhook URL/secret (sig v3)     |
 | `/api/settings/oauth/start`    | POST   | HubSpot Settings: return OXID authorize URL                |
 | `/api/settings/mapping`        | GET/PUT| HubSpot Settings: read/save per-tenant field map            |
-| `/webhooks/hubspot`            | POST   | HubSpot contact change events (signature v3 verified)       |
+| `/webhooks/hubspot`            | POST   | HubSpot contact events: object.creation + mapped propertyChange → OXID |
 | `/webhooks/oxid/:oxidShopId`   | POST   | OXID customer change events (HMAC verified)                 |
 | `/webhooks/oxid/:oxidShopId/probe` | POST | Mapping setup: capture sample keys, no sync enqueue     |
 
@@ -128,11 +133,18 @@ Three places where this deliberately differs from the guide:
    row and return immediately; the worker does the actual sync with retry and backoff. Otherwise a
    slow destination would cause the sender to retry and multiply the work.
 
-The OXID write path is behind the `OxidClient` interface and currently runs against an in-memory
-stub (`OXID_CLIENT_MODE=stub`), which logs every call it would have made. Filling in the five
-methods in [src/oxid/adapters/oxapiClient.ts](src/oxid/adapters/oxapiClient.ts) is the only change
-needed once the shop API is confirmed — see section 3 of
-[docs/oxid-module-contract.md](docs/oxid-module-contract.md).
+The OXID write path is behind the `OxidClient` interface. With `OXID_CLIENT_MODE=stub` (default)
+it runs against an in-memory fake that logs every call. With `OXID_CLIENT_MODE=oxapi` it calls the
+MWV **User API** (`updateUsers` / `insertUsers`) using the shop's OAuth bearer token.
+
+HubSpot → OXID sync is **email-first**: the worker fetches the full HubSpot contact (webhooks only
+carry `objectId`), then upserts in OXID by `oxusername` (normalized email) — update if the user
+exists, insert otherwise. When `OXID_USER_INSERT_PASSWORD` is set, it is included on
+`insertUsers` as an AES-256-CBC encrypted password payload (see
+[API_DOCUMENTATION.md](../API_DOCUMENTATION.md)); when unset, insert proceeds without a password
+field. Implementation:
+[src/oxid/adapters/oxapiClient.ts](src/oxid/adapters/oxapiClient.ts),
+[src/oxid/userApi.ts](src/oxid/userApi.ts).
 
 ## Security notes
 

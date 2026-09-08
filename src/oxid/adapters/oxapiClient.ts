@@ -1,32 +1,38 @@
-import { oxidBaseUrl, type IntegrationRow } from '../../db/repositories/integrations';
-import { ExternalApiError, NotImplementedError } from '../../lib/errors';
+import { env } from '../../config/env';
+import { ExternalApiError, IntegrationNotReadyError } from '../../lib/errors';
 import { logger } from '../../lib/logger';
+import type { CanonicalContact } from '../../sync/fieldMap';
+import type { TenantFieldMap } from '../../sync/tenantFieldMap';
+import { oxidBaseUrl, type IntegrationRow } from '../../db/repositories/integrations';
 import type { OxidClient, OxidCustomer, OxidCustomerInput } from '../client';
 import { getValidOxidToken } from '../tokenService';
+import {
+  buildOxidUserRecord,
+  OxidUserNotFoundError,
+  parseUserApiResponse,
+  USER_API_INSERT_PATH,
+  USER_API_UPDATE_PATH,
+  userApiUrl,
+  type OxidUserApiResponse,
+} from '../userApi';
 
 /**
- * Real OXID shop adapter.
+ * Real OXID shop adapter via MWV User API (`userapi`).
  *
- * Transport (auth + request/response handling) is finished; the five operations
- * are intentionally unimplemented until the shop-side API is confirmed - see
- * section 3 of docs/oxid-module-contract.md. Filling them in is the only change
- * needed to go live: nothing outside this file knows how OXID is reached.
- *
- * Each method below documents the assumed call so the shape can be checked
- * against the real API before any code is written.
+ * HubSpot → OXID uses email (`oxusername`) as the natural key: try updateUsers,
+ * then insertUsers when the user does not exist yet.
  */
 export class OxapiClient implements OxidClient {
   readonly mode = 'oxapi' as const;
 
   constructor(private readonly integration: IntegrationRow) {}
 
-  /** Authenticated request helper against the shop, with a fresh bearer token. */
   protected async request<T>(
     path: string,
     init: { method?: string; body?: unknown } = {},
   ): Promise<T> {
     const token = await getValidOxidToken(this.integration.id);
-    const url = `${oxidBaseUrl(this.integration)}${path}`;
+    const url = userApiUrl(oxidBaseUrl(this.integration), path);
 
     const response = await fetch(url, {
       method: init.method ?? 'POST',
@@ -40,55 +46,158 @@ export class OxapiClient implements OxidClient {
 
     const text = await response.text();
     if (!response.ok) {
-      throw new ExternalApiError(`OXID ${init.method ?? 'POST'} ${path} failed`, {
+      throw new ExternalApiError(`OXID User API HTTP ${response.status}`, {
         system: 'oxid',
         status: response.status,
         details: text.slice(0, 1000),
       });
     }
 
-    const body = text ? (JSON.parse(text) as T & { errors?: unknown[] }) : ({} as T);
+    return (text ? JSON.parse(text) : {}) as T;
+  }
 
-    // GraphQL answers 200 with an `errors` array, so a status check is not enough.
-    if (body && typeof body === 'object' && Array.isArray((body as { errors?: unknown[] }).errors)) {
-      throw new ExternalApiError(`OXID ${path} returned GraphQL errors`, {
-        system: 'oxid',
-        status: 200,
-        details: (body as { errors?: unknown[] }).errors?.slice(0, 5),
-      });
+  async upsertCustomerByEmail(
+    email: string,
+    contact: CanonicalContact,
+    map: TenantFieldMap,
+    _options?: { oxidRecordId?: string | null },
+  ): Promise<OxidCustomer> {
+    // User API update/insert identify by oxusername only (never send oxid).
+    const userRecord = buildOxidUserRecord(contact, map, email);
+    const { oxid: _oxid, ...payload } = userRecord;
+
+    try {
+      return await this.updateUserRecord(payload);
+    } catch (error) {
+      if (!(error instanceof OxidUserNotFoundError)) throw error;
+      logger.info(
+        { integrationId: this.integration.id, email: email.slice(0, 3) + '***' },
+        'OXID user not found by email, inserting',
+      );
+      return await this.insertUserRecord(payload);
+    }
+  }
+
+  private async updateUserRecord(
+    userRecord: Record<string, string | number>,
+  ): Promise<OxidCustomer> {
+    const requestBody = { users: [userRecord] };
+    const body = await this.request<OxidUserApiResponse>(USER_API_UPDATE_PATH, {
+      body: requestBody,
+    });
+    // Temporary debug — compare with Postman updateUsers
+    console.log('[OXID updateUsers] request', JSON.stringify(requestBody, null, 2));
+    console.log('[OXID updateUsers] response', JSON.stringify(body, null, 2));
+    logger.info(
+      { integrationId: this.integration.id, fnc: 'updateUsers', request: requestBody, response: body },
+      'OXID updateUsers raw result',
+    );
+    return parseUserApiResponse(body);
+  }
+
+  private async insertUserRecord(
+    userRecord: Record<string, string | number>,
+  ): Promise<OxidCustomer> {
+    const encryptedPassword = env.OXID_USER_INSERT_PASSWORD;
+    const payload: Record<string, string | number> = { ...userRecord };
+    if (encryptedPassword) {
+      payload.password = encryptedPassword;
     }
 
-    return body;
+    const requestBody = { users: [payload] };
+    const body = await this.request<OxidUserApiResponse>(USER_API_INSERT_PATH, {
+      body: requestBody,
+    });
+    const logSafeBody = {
+      users: [{ ...payload, ...(payload.password ? { password: '[redacted]' } : {}) }],
+    };
+    // Temporary debug — compare with Postman insertUsers
+    console.log('[OXID insertUsers] request', JSON.stringify(logSafeBody, null, 2));
+    console.log('[OXID insertUsers] response', JSON.stringify(body, null, 2));
+    logger.info(
+      {
+        integrationId: this.integration.id,
+        fnc: 'insertUsers',
+        request: logSafeBody,
+        response: body,
+      },
+      'OXID insertUsers raw result',
+    );
+    return parseUserApiResponse(body);
   }
 
-  /** Expected: query customer by email, mapped onto {@link OxidCustomer}. */
-  async findCustomerByEmail(email: string): Promise<OxidCustomer | null> {
-    logger.warn({ email: email.slice(0, 3) + '***' }, 'oxapi adapter not implemented');
-    throw new NotImplementedError('OxapiClient.findCustomerByEmail');
+  /** @deprecated Prefer {@link upsertCustomerByEmail}. */
+  async findCustomerByEmail(_email: string): Promise<OxidCustomer | null> {
+    return null;
   }
 
-  /** Expected: query customer by its `oxid` primary key. */
+  /** @deprecated Prefer {@link upsertCustomerByEmail}. */
   async getCustomer(_id: string): Promise<OxidCustomer | null> {
-    throw new NotImplementedError('OxapiClient.getCustomer');
+    return null;
   }
 
-  /** Expected: create a customer from email/first name/last name/phone. */
-  async createCustomer(_input: OxidCustomerInput): Promise<OxidCustomer> {
-    throw new NotImplementedError('OxapiClient.createCustomer');
+  /** @deprecated Prefer {@link upsertCustomerByEmail}. */
+  async createCustomer(input: OxidCustomerInput): Promise<OxidCustomer> {
+    const email = input.email?.trim().toLowerCase();
+    if (!email) {
+      throw new IntegrationNotReadyError('createCustomer requires email');
+    }
+    const record = buildOxidUserRecord(
+      {
+        email,
+        firstName: input.firstName ?? null,
+        lastName: input.lastName ?? null,
+        phone: input.phone ?? null,
+      },
+      {
+        version: 1,
+        oxidIdPaths: ['oxid'],
+        fields: [
+          { canonical: 'email', oxidPath: 'oxusername', hubspotProperty: 'email', transform: 'none' },
+          { canonical: 'firstName', oxidPath: 'oxfname', hubspotProperty: 'firstname', transform: 'none' },
+          { canonical: 'lastName', oxidPath: 'oxlname', hubspotProperty: 'lastname', transform: 'none' },
+          { canonical: 'phone', oxidPath: 'oxfon', hubspotProperty: 'phone', transform: 'none' },
+        ],
+      },
+      email,
+    );
+    return this.insertUserRecord(record);
   }
 
-  /**
-   * Expected: update an *arbitrary* existing customer. Note that OXID's standard
-   * graphql-storefront only exposes self-service mutations for the logged-in
-   * customer, so this most likely needs an admin-scoped API or a REST endpoint
-   * on the sync module itself.
-   */
-  async updateCustomer(_id: string, _input: OxidCustomerInput): Promise<OxidCustomer> {
-    throw new NotImplementedError('OxapiClient.updateCustomer');
+  /** @deprecated Prefer {@link upsertCustomerByEmail}. */
+  async updateCustomer(id: string, input: OxidCustomerInput): Promise<OxidCustomer> {
+    const email = (input.email ?? id).trim().toLowerCase();
+    const record = buildOxidUserRecord(
+      {
+        email,
+        firstName: input.firstName ?? null,
+        lastName: input.lastName ?? null,
+        phone: input.phone ?? null,
+      },
+      {
+        version: 1,
+        oxidIdPaths: ['oxid'],
+        fields: [
+          { canonical: 'email', oxidPath: 'oxusername', hubspotProperty: 'email', transform: 'none' },
+          { canonical: 'firstName', oxidPath: 'oxfname', hubspotProperty: 'firstname', transform: 'none' },
+          { canonical: 'lastName', oxidPath: 'oxlname', hubspotProperty: 'lastname', transform: 'none' },
+          { canonical: 'phone', oxidPath: 'oxfon', hubspotProperty: 'phone', transform: 'none' },
+        ],
+      },
+      email,
+    );
+    if (id.includes('@')) {
+      const { oxid: _oxid, ...byEmail } = record;
+      byEmail.oxusername = email;
+      return this.updateUserRecord(byEmail);
+    }
+    // Even when called with an oxid id, User API updates use oxusername only.
+    const { oxid: _oxid, ...byEmail } = record;
+    byEmail.oxusername = email;
+    return this.updateUserRecord(byEmail);
   }
 
-  /** Expected: customers with `updatedAt`/`oxtimestamp` at or after `since`. */
   async listModifiedSince(_since: Date): Promise<OxidCustomer[]> {
-    throw new NotImplementedError('OxapiClient.listModifiedSince');
+    return [];
   }
 }
