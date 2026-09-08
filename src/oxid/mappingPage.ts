@@ -471,7 +471,7 @@ export function renderMappingPage(props: MappingPageProps): string {
     </section>
 
     <section class="panel" data-step="3">
-      <p class="hint">Pick which OXID path feeds each HubSpot contact property. Email is required. Leave <code>oxidId</code> unmapped on both sides unless you have created a matching HubSpot property — the shop record id is stored separately for matching.</p>
+      <p class="hint">Pick which OXID path feeds each HubSpot contact property. Email is required. <code>oxidId</code> defaults to OXID <code>oxid</code> ↔ HubSpot <code>ox_user_id</code> so HubSpot → OXID updates can target the shop user by id.</p>
       <div class="map-grid" id="map-grid"></div>
       <div class="preview" id="preview-box" style="display:none">
         <strong>Dry-run preview</strong>

@@ -38,11 +38,11 @@ describe('tenantFieldMap', () => {
     });
   });
 
-  it('defaults map oxidId blank and oxsal → salutation', () => {
+  it('defaults map oxidId to oxid ↔ ox_user_id and oxsal → salutation', () => {
     const map = defaultTenantFieldMap();
     expect(map.fields.find((field) => field.canonical === 'oxidId')).toMatchObject({
-      oxidPath: null,
-      hubspotProperty: null,
+      oxidPath: 'oxid',
+      hubspotProperty: 'ox_user_id',
     });
     expect(map.fields.find((field) => field.canonical === 'salutation')).toMatchObject({
       oxidPath: 'oxsal',
@@ -64,11 +64,11 @@ describe('tenantFieldMap', () => {
     expect(mapped.fields).toMatchObject({
       salutation: 'MR',
       country: 'Deutschland',
+      oxidId: 'c1eec0d427dee923affddeb9c391f670',
     });
-    expect(mapped.fields).not.toHaveProperty('oxidId');
   });
 
-  it('scrubs stale oxid → oxid_id bindings so HubSpot is never sent oxid_id by default', () => {
+  it('migrates stale oxid → oxid_id bindings to ox_user_id', () => {
     const scrubbed = parseTenantFieldMap(
       JSON.stringify({
         version: 1,
@@ -90,18 +90,18 @@ describe('tenantFieldMap', () => {
       }),
     );
     expect(scrubbed.fields.find((field) => field.canonical === 'oxidId')).toMatchObject({
-      oxidPath: null,
-      hubspotProperty: null,
+      oxidPath: 'oxid',
+      hubspotProperty: 'ox_user_id',
     });
     expect(
       toHubspotPropertiesWithMap(
         { email: 'a@b.de', oxidId: 'abc' },
         scrubbed,
       ),
-    ).not.toHaveProperty('oxid_id');
+    ).toMatchObject({ ox_user_id: 'abc' });
   });
 
-  it('does not suggest oxid for HubSpot mapping', () => {
+  it('suggests oxid ↔ ox_user_id when oxid is present in the sample', () => {
     const { keys } = discoverOxidPayloadKeys({
       users: {
         oxid: 'abc',
@@ -113,7 +113,10 @@ describe('tenantFieldMap', () => {
       },
     });
     const suggested = suggestMapFromKeys(keys);
-    expect(suggested.fields.find((field) => field.canonical === 'oxidId')?.oxidPath).toBeNull();
+    expect(suggested.fields.find((field) => field.canonical === 'oxidId')).toMatchObject({
+      oxidPath: 'oxid',
+      hubspotProperty: 'ox_user_id',
+    });
     expect(suggested.fields.find((field) => field.canonical === 'salutation')?.oxidPath).toBe(
       'salutation.title_1',
     );

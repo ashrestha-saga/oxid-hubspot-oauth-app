@@ -182,6 +182,39 @@ describe('syncContact: HubSpot -> OXID', () => {
     expect(customers[0]).toMatchObject({ id: 'oxid-existing', firstName: 'Neu' });
   });
 
+  it('updates OXID by oxid from HubSpot ox_user_id', async () => {
+    const integration = addIntegration({ portalId: 1231 });
+    seedStubCustomer(integration.id, {
+      id: 'oxid-from-hs',
+      email: 'other@example.com',
+      firstName: 'Alt',
+      lastName: null,
+      phone: null,
+      updatedAt: new Date().toISOString(),
+    });
+    const contact = seedFakeHubspotContact(integration.id, {
+      properties: {
+        email: 'match-by-id@example.com',
+        firstname: 'Neu',
+        ox_user_id: 'oxid-from-hs',
+      },
+    });
+
+    await syncContact({
+      integrationId: integration.id,
+      direction: 'hubspot_to_oxid',
+      sourceRecord: { id: contact.id },
+    });
+
+    const customers = stubCustomers(integration.id);
+    expect(customers).toHaveLength(1);
+    expect(customers[0]).toMatchObject({
+      id: 'oxid-from-hs',
+      email: 'match-by-id@example.com',
+      firstName: 'Neu',
+    });
+  });
+
   it('merges duplicate half-mapped rows instead of failing on unique oxid email', async () => {
     const integration = addIntegration({ portalId: 124 });
     const contact = seedFakeHubspotContact(integration.id, {

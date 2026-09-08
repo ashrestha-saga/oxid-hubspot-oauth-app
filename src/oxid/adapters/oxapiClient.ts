@@ -19,8 +19,8 @@ import {
 /**
  * Real OXID shop adapter via MWV User API (`userapi`).
  *
- * HubSpot → OXID uses email (`oxusername`) as the natural key: try updateUsers,
- * then insertUsers when the user does not exist yet.
+ * HubSpot → OXID: updateUsers prefers `oxid` when known, otherwise `oxusername`.
+ * On "user not found", insertUsers always uses `oxusername`.
  */
 export class OxapiClient implements OxidClient {
   readonly mode = 'oxapi' as const;
@@ -60,21 +60,22 @@ export class OxapiClient implements OxidClient {
     email: string,
     contact: CanonicalContact,
     map: TenantFieldMap,
-    _options?: { oxidRecordId?: string | null },
+    options?: { oxidRecordId?: string | null },
   ): Promise<OxidCustomer> {
-    // User API update/insert identify by oxusername only (never send oxid).
     const userRecord = buildOxidUserRecord(contact, map, email);
-    const { oxid: _oxid, ...payload } = userRecord;
+    const { oxid: _oxid, ...byEmail } = userRecord;
+    const updatePayload = withUpdateIdentity(byEmail, options?.oxidRecordId);
 
     try {
-      return await this.updateUserRecord(payload);
+      return await this.updateUserRecord(updatePayload);
     } catch (error) {
       if (!(error instanceof OxidUserNotFoundError)) throw error;
       logger.info(
         { integrationId: this.integration.id, email: email.slice(0, 3) + '***' },
-        'OXID user not found by email, inserting',
+        'OXID user not found, inserting',
       );
-      return await this.insertUserRecord(payload);
+      // insertUsers always identifies by oxusername (new users have no oxid yet).
+      return await this.insertUserRecord(byEmail);
     }
   }
 
@@ -186,18 +187,29 @@ export class OxapiClient implements OxidClient {
       },
       email,
     );
-    if (id.includes('@')) {
-      const { oxid: _oxid, ...byEmail } = record;
-      byEmail.oxusername = email;
-      return this.updateUserRecord(byEmail);
-    }
-    // Even when called with an oxid id, User API updates use oxusername only.
     const { oxid: _oxid, ...byEmail } = record;
     byEmail.oxusername = email;
-    return this.updateUserRecord(byEmail);
+    // Prefer oxid when the caller passed a real shop id; otherwise oxusername.
+    const oxidRecordId = id.includes('@') ? null : id;
+    return this.updateUserRecord(withUpdateIdentity(byEmail, oxidRecordId));
   }
 
   async listModifiedSince(_since: Date): Promise<OxidCustomer[]> {
     return [];
   }
+}
+
+/**
+ * updateUsers identity: use `oxid` when known, otherwise keep `oxusername`.
+ * When updating by oxid, drop oxusername so the API matches on the shop id.
+ */
+function withUpdateIdentity(
+  byEmail: Record<string, string | number>,
+  oxidRecordId?: string | null,
+): Record<string, string | number> {
+  const trimmed = oxidRecordId?.trim();
+  if (!trimmed || trimmed.includes('@')) return byEmail;
+
+  const { oxusername: _oxusername, ...rest } = byEmail;
+  return { oxid: trimmed, ...rest };
 }

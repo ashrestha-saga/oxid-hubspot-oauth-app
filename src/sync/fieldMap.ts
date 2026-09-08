@@ -18,8 +18,8 @@ export const contactFieldMap = [
   { canonical: 'city', hubspot: 'city', oxid: 'city', direction: 'both' },
   { canonical: 'zip', hubspot: 'zip', oxid: 'zip', direction: 'both' },
   { canonical: 'country', hubspot: 'country', oxid: 'country', direction: 'both' },
-  /** OXID object id (`oxid`). Not a HubSpot property by default — map both sides only if the portal has a custom property. */
-  { canonical: 'oxidId', hubspot: 'oxid_id', oxid: 'oxidId', direction: 'oxid_to_hubspot' },
+  /** OXID object id (`oxid`) ↔ HubSpot custom property `ox_user_id` (used for updateUsers). */
+  { canonical: 'oxidId', hubspot: 'ox_user_id', oxid: 'oxidId', direction: 'both' },
 ] as const;
 
 export type ContactFieldMapping = (typeof contactFieldMap)[number];
@@ -28,13 +28,7 @@ export type CanonicalContact = Partial<Record<CanonicalField, string | null>>;
 
 /** Fields to request from HubSpot: the mapped ones plus what sync needs itself. */
 export const hubspotReadProperties: string[] = [
-  ...new Set([
-    ...contactFieldMap
-      .filter((field) => field.canonical !== 'oxidId')
-      .map((field) => field.hubspot),
-    'email',
-    'lastmodifieddate',
-  ]),
+  ...new Set([...contactFieldMap.map((field) => field.hubspot), 'email', 'lastmodifieddate']),
 ];
 
 export const canonicalFields: CanonicalField[] = contactFieldMap.map((field) => field.canonical);

@@ -196,8 +196,10 @@ async function writeToOxid(
 ): Promise<string> {
   const client = oxidClientFor(integration);
   const map = parseTenantFieldMap(integration.fieldMappingJson);
+  // Prefer HubSpot ox_user_id (canonical oxidId), then the stored mapping id.
+  const oxidRecordId = contact.oxidId?.trim() || mapping.oxidRecordId;
   const result = await client.upsertCustomerByEmail(email, contact, map, {
-    oxidRecordId: mapping.oxidRecordId,
+    oxidRecordId,
   });
   return result.id;
 }
@@ -287,7 +289,7 @@ export async function syncContact(input: SyncContactInput): Promise<SyncContactR
           }
         : {
             oxidCustomerId: email,
-            // Store OXID object id for future update-by-oxid; User API writes still use email.
+            // Store OXID object id so later HubSpot → OXID updates can use updateUsers by oxid.
             ...(destinationId.includes('@') ? {} : { oxidRecordId: destinationId }),
           };
 

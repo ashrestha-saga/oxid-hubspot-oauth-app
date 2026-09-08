@@ -35,8 +35,8 @@ export interface TenantFieldMap {
   /**
    * Paths tried in order to resolve the OXID record key (normalized email).
    * `oxusername` / `email` are used as the sync key today.
-   * `oxid` may be listed for mapping/discovery but is not used as the sync key
-   * or sent on User API writes yet (see resolveOxidRecordId / buildOxidUserRecord).
+   * `oxid` may be listed for mapping/discovery; HubSpot `ox_user_id` supplies it
+   * for User API updateUsers (see writeToOxid / buildOxidUserRecord).
    * Example: ["oxusername", "oxid"]
    */
   oxidIdPaths: string[];
@@ -91,7 +91,7 @@ export function defaultTenantFieldMap(): TenantFieldMap {
               : field.canonical === 'salutation'
                 ? 'oxsal'
                 : field.canonical === 'oxidId'
-                  ? null
+                  ? 'oxid'
                   : field.canonical === 'phone'
                     ? 'oxfon'
                     : field.canonical === 'company'
@@ -120,8 +120,7 @@ export function defaultTenantFieldMap(): TenantFieldMap {
       return {
         canonical: field.canonical,
         oxidPath,
-        // oxidId stays fully unmapped until the user picks both sides explicitly.
-        hubspotProperty: field.canonical === 'oxidId' ? null : field.hubspot,
+        hubspotProperty: field.hubspot,
         transform,
       };
     }),
@@ -140,16 +139,18 @@ export function parseTenantFieldMap(json: string | null | undefined): TenantFiel
 }
 
 /**
- * oxidId must not target HubSpot unless the user maps both sides to a real property.
- * Clears blank OXID rows and the stale default `oxid` → `oxid_id` pair (property
- * is not a HubSpot standard field and usually does not exist on the portal).
+ * Drop incomplete oxidId bindings. Migrate stale HubSpot `oxid_id` → `ox_user_id`.
+ * Default map is oxid ↔ ox_user_id for updateUsers identity.
  */
 export function scrubUnmappedOxidId(map: TenantFieldMap): TenantFieldMap {
   return {
     ...map,
     fields: map.fields.map((field) => {
       if (field.canonical !== 'oxidId') return field;
-      if (!field.oxidPath || !field.hubspotProperty || field.hubspotProperty === 'oxid_id') {
+      if (field.oxidPath && field.hubspotProperty === 'oxid_id') {
+        return { ...field, hubspotProperty: 'ox_user_id' };
+      }
+      if (!field.oxidPath || !field.hubspotProperty) {
         return { ...field, oxidPath: null, hubspotProperty: null };
       }
       return field;
@@ -178,7 +179,8 @@ export function hubspotPropertiesFromMap(map: TenantFieldMap): string[] {
   const mapped = map.fields
     .filter((field) => field.oxidPath && field.hubspotProperty)
     .map((field) => field.hubspotProperty!);
-  return [...new Set([...mapped, 'email', 'lastmodifieddate'])];
+  // Always fetch ox_user_id so HubSpot → OXID can updateUsers by oxid.
+  return [...new Set([...mapped, 'ox_user_id', 'email', 'lastmodifieddate'])];
 }
 
 export function getByPath(source: unknown, path: string): unknown {
@@ -320,6 +322,10 @@ export function canonicalFromHubspot(contact: HubspotContact, map: TenantFieldMa
       contact.properties[binding.hubspotProperty] ?? null,
     );
   }
+  // Prefer mapped oxidId; otherwise fall back to HubSpot ox_user_id for updateUsers.
+  if (!fields.oxidId) {
+    fields.oxidId = normalizeValue('oxidId', contact.properties.ox_user_id ?? null);
+  }
   return normalizeContact(fields);
 }
 
@@ -417,8 +423,7 @@ export function suggestMapFromKeys(keys: DiscoveredKey[]): TenantFieldMap {
       'salutation.id',
       'oxsal',
     ),
-    // Never auto-map `oxid` into HubSpot — keep blank; id is stored via oxidIdPaths / rawOxid.
-    oxidId: null,
+    oxidId: has('oxid'),
     phone: has(
       'oxfon',
       'phone',
@@ -478,11 +483,13 @@ export function suggestMapFromKeys(keys: DiscoveredKey[]): TenantFieldMap {
     oxidIdPaths,
     fields: base.fields.map((field) => ({
       ...field,
-      oxidPath:
+      oxidPath: suggestions[field.canonical] ?? field.oxidPath,
+      hubspotProperty:
         field.canonical === 'oxidId'
-          ? null
-          : (suggestions[field.canonical] ?? field.oxidPath),
-      hubspotProperty: field.canonical === 'oxidId' ? null : field.hubspotProperty,
+          ? suggestions.oxidId
+            ? 'ox_user_id'
+            : null
+          : field.hubspotProperty,
     })),
   };
 }

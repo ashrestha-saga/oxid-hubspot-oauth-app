@@ -94,6 +94,7 @@ describe('field mapping', () => {
     expect(hubspotReadProperties).toContain('country');
     expect(hubspotReadProperties).toContain('salutation');
     expect(hubspotReadProperties).not.toContain('oxid_id');
+    expect(hubspotReadProperties).toContain('ox_user_id');
     expect(hubspotReadProperties).toContain('lastmodifieddate');
     expect(new Set(hubspotReadProperties).size).toBe(hubspotReadProperties.length);
   });

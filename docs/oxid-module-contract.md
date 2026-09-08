@@ -176,8 +176,10 @@ When HubSpot fires `object.creation` or a mapped `object.propertyChange`, the ba
 1. Fetches the full contact from HubSpot CRM by `objectId` (webhooks do not include email).
 2. Normalizes email as the natural key (`oxusername`).
 3. Calls `POST ?cl=userapi&fnc=updateUsers` with mapped fields (`oxfname`, `oxlname`, `oxfon`, …).
+   Prefers `oxid` when `entity_mappings.oxid_record_id` is known; otherwise identifies by
+   `oxusername` (email).
 4. If the shop returns "user not found", calls `POST ?cl=userapi&fnc=insertUsers` with the same
-   fields. When `OXID_USER_INSERT_PASSWORD` is configured, an encrypted `password` is included;
+   fields (always keyed by `oxusername`). When `OXID_USER_INSERT_PASSWORD` is configured, an encrypted `password` is included;
    otherwise the field is omitted.
 
 After a successful write, the backend stores the normalized **email** in `entity_mappings` as the

@@ -31,7 +31,7 @@ export interface OxidCustomerInput {
  */
 export interface OxidClient {
   readonly mode: 'stub' | 'oxapi';
-  /** HubSpot → OXID: update by email (`oxusername`), insert when missing. */
+  /** HubSpot → OXID: update by `oxid` when known, else email; insert when missing. */
   upsertCustomerByEmail(
     email: string,
     contact: CanonicalContact,

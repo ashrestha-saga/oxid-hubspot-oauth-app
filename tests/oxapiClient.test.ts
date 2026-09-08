@@ -73,7 +73,7 @@ describe('OxapiClient.upsertCustomerByEmail', () => {
     });
   });
 
-  it('updates by oxusername even when oxidRecordId is provided', async () => {
+  it('updates by oxid when oxidRecordId is provided', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       text: async () =>
@@ -93,8 +93,14 @@ describe('OxapiClient.upsertCustomerByEmail', () => {
     expect(result.id).toBe('ox-known');
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string);
-    expect(body.users[0]).not.toHaveProperty('oxid');
-    expect(body.users[0].oxusername).toBe('hub@example.com');
+    expect(body.users[0]).toEqual({
+      oxid: 'ox-known',
+      oxactive: 1,
+      oxfname: 'Hub',
+      oxlname: 'Spot',
+      oxfon: '+491234',
+    });
+    expect(body.users[0]).not.toHaveProperty('oxusername');
   });
 
   it('inserts when update returns user not found', async () => {
