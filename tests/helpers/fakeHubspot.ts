@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import type { HubspotContact, HubspotProperties } from '../../src/hubspot/client';
+import type {
+  HubspotCompany,
+  HubspotContact,
+  HubspotProperties,
+} from '../../src/hubspot/client';
 
 /**
  * In-memory HubSpot CRM. Counts writes so tests can prove that a suppressed
@@ -7,6 +11,9 @@ import type { HubspotContact, HubspotProperties } from '../../src/hubspot/client
  */
 interface Store {
   contacts: Map<string, HubspotContact>;
+  companies: Map<string, HubspotCompany>;
+  /** `${contactId}:${companyId}` pairs. */
+  associations: Set<string>;
   writes: number;
   reads: number;
 }
@@ -16,7 +23,13 @@ const stores = new Map<string, Store>();
 function storeFor(integrationId: string): Store {
   let store = stores.get(integrationId);
   if (!store) {
-    store = { contacts: new Map(), writes: 0, reads: 0 };
+    store = {
+      contacts: new Map(),
+      companies: new Map(),
+      associations: new Set(),
+      writes: 0,
+      reads: 0,
+    };
     stores.set(integrationId, store);
   }
   return store;
@@ -28,12 +41,16 @@ export function resetFakeHubspot(): void {
 
 export function fakeHubspotStore(integrationId: string): {
   contacts: HubspotContact[];
+  companies: HubspotCompany[];
+  associations: string[];
   writes: number;
   reads: number;
 } {
   const store = storeFor(integrationId);
   return {
     contacts: [...store.contacts.values()].map((contact) => ({ ...contact })),
+    companies: [...store.companies.values()].map((company) => ({ ...company })),
+    associations: [...store.associations],
     writes: store.writes,
     reads: store.reads,
   };
@@ -49,6 +66,19 @@ export function seedFakeHubspotContact(
     updatedAt: new Date().toISOString(),
   };
   storeFor(integrationId).contacts.set(record.id, record);
+  return record;
+}
+
+export function seedFakeHubspotCompany(
+  integrationId: string,
+  company: { id?: string; properties: HubspotProperties },
+): HubspotCompany {
+  const record: HubspotCompany = {
+    id: company.id ?? `hs-co-${randomUUID()}`,
+    properties: { ...company.properties },
+    updatedAt: new Date().toISOString(),
+  };
+  storeFor(integrationId).companies.set(record.id, record);
   return record;
 }
 
@@ -119,6 +149,71 @@ export class FakeHubspotClient {
     return [...store.contacts.values()]
       .filter((contact) => !contact.updatedAt || new Date(contact.updatedAt) >= since)
       .map((contact) => ({ ...contact, properties: { ...contact.properties } }));
+  }
+
+  async getCompany(id: string, _properties: string[]): Promise<HubspotCompany | null> {
+    const store = storeFor(this.integrationId);
+    store.reads += 1;
+    const found = store.companies.get(id);
+    return found ? { ...found, properties: { ...found.properties } } : null;
+  }
+
+  async findCompanyByName(name: string, _properties: string[]): Promise<HubspotCompany | null> {
+    const store = storeFor(this.integrationId);
+    store.reads += 1;
+    const needle = name.trim().toLowerCase();
+    for (const company of store.companies.values()) {
+      if ((company.properties.name ?? '').trim().toLowerCase() === needle) {
+        return { ...company, properties: { ...company.properties } };
+      }
+    }
+    return null;
+  }
+
+  async createCompany(properties: HubspotProperties): Promise<HubspotCompany> {
+    const store = storeFor(this.integrationId);
+    store.writes += 1;
+    const company: HubspotCompany = {
+      id: `hs-co-${randomUUID()}`,
+      properties: { ...properties },
+      updatedAt: new Date().toISOString(),
+    };
+    store.companies.set(company.id, company);
+    return { ...company, properties: { ...company.properties } };
+  }
+
+  async updateCompany(id: string, properties: HubspotProperties): Promise<HubspotCompany> {
+    const store = storeFor(this.integrationId);
+    store.writes += 1;
+    const existing = store.companies.get(id);
+    const company: HubspotCompany = {
+      id,
+      properties: { ...(existing?.properties ?? {}), ...properties },
+      updatedAt: new Date().toISOString(),
+    };
+    store.companies.set(id, company);
+    return { ...company, properties: { ...company.properties } };
+  }
+
+  async upsertCompanyByName(
+    name: string,
+    properties: HubspotProperties,
+    readProperties: string[],
+  ): Promise<{ company: HubspotCompany; created: boolean }> {
+    const existing = await this.findCompanyByName(name, readProperties);
+    if (existing) {
+      return { company: await this.updateCompany(existing.id, properties), created: false };
+    }
+    return {
+      company: await this.createCompany({ ...properties, name }),
+      created: true,
+    };
+  }
+
+  async associateContactToCompany(contactId: string, companyId: string): Promise<void> {
+    const store = storeFor(this.integrationId);
+    store.writes += 1;
+    store.associations.add(`${contactId}:${companyId}`);
   }
 }
 

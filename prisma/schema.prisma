@@ -49,9 +49,10 @@ model Integration {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  entityMappings EntityMapping[]
-  syncEvents     SyncEvent[]
-  syncJobs       SyncJob[]
+  entityMappings  EntityMapping[]
+  companyMappings CompanyMapping[]
+  syncEvents      SyncEvent[]
+  syncJobs        SyncJob[]
 
   @@index([status])
   @@map("integrations")
@@ -88,6 +89,30 @@ model EntityMapping {
   @@unique([integrationId, oxidRecordId])
   @@index([integrationId])
   @@map("entity_mappings")
+}
+
+/// OXID → HubSpot Company object mapping (keyed by normalized company name).
+model CompanyMapping {
+  id               String  @id @default(uuid())
+  integrationId    String  @map("integration_id")
+  /// Normalized company name used as the match key (lowercase, collapsed whitespace).
+  companyKey       String  @map("company_key")
+  companyName      String? @map("company_name")
+  hubspotCompanyId String? @map("hubspot_company_id")
+
+  lastSyncedAt      DateTime? @map("last_synced_at")
+  lastSyncedHash    String?   @map("last_synced_hash")
+  sourceOfLastWrite String?   @map("source_of_last_write")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@unique([integrationId, companyKey])
+  @@unique([integrationId, hubspotCompanyId])
+  @@index([integrationId])
+  @@map("company_mappings")
 }
 
 /// Append-only audit trail. Every sync attempt lands here, including skips.

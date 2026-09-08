@@ -9,6 +9,12 @@ export interface HubspotContact {
   updatedAt: string | null;
 }
 
+export interface HubspotCompany {
+  id: string;
+  properties: Record<string, string | null>;
+  updatedAt: string | null;
+}
+
 export type HubspotProperties = Record<string, string | null>;
 
 interface SearchResponse {
@@ -42,6 +48,18 @@ function contactFrom(raw: {
   properties?: HubspotProperties;
   updatedAt?: string;
 }): HubspotContact {
+  return {
+    id: String(raw.id),
+    properties: raw.properties ?? {},
+    updatedAt: raw.updatedAt ?? null,
+  };
+}
+
+function companyFrom(raw: {
+  id: string;
+  properties?: HubspotProperties;
+  updatedAt?: string;
+}): HubspotCompany {
   return {
     id: String(raw.id),
     properties: raw.properties ?? {},
@@ -248,6 +266,102 @@ export class HubspotClient {
         type: property.type,
       }))
       .sort((a, b) => a.label.localeCompare(b.label));
+  }
+
+  async getCompany(id: string, properties: string[]): Promise<HubspotCompany | null> {
+    const { status, body } = await this.request<{
+      id: string;
+      properties?: HubspotProperties;
+      updatedAt?: string;
+    }>(
+      {
+        method: 'GET',
+        path: `/crm/v3/objects/companies/${encodeURIComponent(id)}`,
+        qs: { properties: properties.join(',') },
+      },
+      [404],
+    );
+
+    if (status === 404 || !body) return null;
+    return companyFrom(body);
+  }
+
+  async findCompanyByName(name: string, properties: string[]): Promise<HubspotCompany | null> {
+    const { body } = await this.request<SearchResponse>({
+      method: 'POST',
+      path: '/crm/v3/objects/companies/search',
+      body: {
+        filterGroups: [{ filters: [{ propertyName: 'name', operator: 'EQ', value: name }] }],
+        properties,
+        limit: 1,
+      },
+    });
+
+    const first = body?.results?.[0];
+    return first ? companyFrom(first) : null;
+  }
+
+  async createCompany(properties: HubspotProperties): Promise<HubspotCompany> {
+    const { status, body, text } = await this.request<{
+      id: string;
+      properties?: HubspotProperties;
+      updatedAt?: string;
+    }>({ method: 'POST', path: '/crm/v3/objects/companies', body: { properties } }, [409]);
+
+    if (status === 409) {
+      const existingId = existingIdFromConflict(text);
+      if (!existingId) {
+        throw new ExternalApiError('HubSpot rejected company create as duplicate', {
+          system: 'hubspot',
+          status: 409,
+          details: text.slice(0, 1000),
+        });
+      }
+      logger.debug({ existingId }, 'company already existed, updating instead');
+      return this.updateCompany(existingId, properties);
+    }
+
+    return companyFrom(body as { id: string; properties?: HubspotProperties });
+  }
+
+  async updateCompany(id: string, properties: HubspotProperties): Promise<HubspotCompany> {
+    const { body } = await this.request<{
+      id: string;
+      properties?: HubspotProperties;
+      updatedAt?: string;
+    }>({
+      method: 'PATCH',
+      path: `/crm/v3/objects/companies/${encodeURIComponent(id)}`,
+      body: { properties },
+    });
+
+    return companyFrom(body as { id: string; properties?: HubspotProperties });
+  }
+
+  async upsertCompanyByName(
+    name: string,
+    properties: HubspotProperties,
+    readProperties: string[],
+  ): Promise<{ company: HubspotCompany; created: boolean }> {
+    const existing = await this.findCompanyByName(name, readProperties);
+    if (existing) {
+      return { company: await this.updateCompany(existing.id, properties), created: false };
+    }
+    return {
+      company: await this.createCompany({ ...properties, name }),
+      created: true,
+    };
+  }
+
+  /**
+   * Ensures the default HubSpot association between a contact and a company.
+   * Idempotent — HubSpot accepts re-associating the same pair.
+   */
+  async associateContactToCompany(contactId: string, companyId: string): Promise<void> {
+    await this.request({
+      method: 'PUT',
+      path: `/crm/v4/objects/contacts/${encodeURIComponent(contactId)}/associations/default/companies/${encodeURIComponent(companyId)}`,
+    });
   }
 }
 

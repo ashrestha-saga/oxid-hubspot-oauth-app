@@ -10,12 +10,14 @@ import { IntegrationNotReadyError, NotFoundError, describeError } from '../lib/e
 import { logger } from '../lib/logger';
 import { oxidClientFor } from '../oxid/client';
 import { originOf, type SyncDirection, type SyncEventStatus, type SyncOrigin } from '../types';
+import { associateContactWithCompany } from './associateContactCompany';
 import {
   emailOf,
   normalizeContact,
   type CanonicalContact,
 } from './fieldMap';
 import { contactHash } from './hash';
+import { syncCompanyFromContact } from './syncCompany';
 import {
   canonicalFromHubspot,
   canonicalFromOxidCustomer,
@@ -50,6 +52,7 @@ export interface SyncContactResult {
   entityMappingId?: string;
   hubspotContactId?: string | null;
   oxidCustomerId?: string | null;
+  hubspotCompanyId?: string | null;
   reason?: string;
 }
 
@@ -255,18 +258,48 @@ export async function syncContact(input: SyncContactInput): Promise<SyncContactR
   // caused it, so origin must play no part here: matching content alone means
   // the destination already holds these values and any write would be a no-op.
   if (mapping.lastSyncedHash === hash) {
+    let hubspotCompanyId: string | null = null;
+    if (direction === 'oxid_to_hubspot' && mapping.hubspotContactId) {
+      try {
+        const companyResult = await syncCompanyFromContact({ integration, contact });
+        if (companyResult.hubspotCompanyId) {
+          hubspotCompanyId = companyResult.hubspotCompanyId;
+          await associateContactWithCompany({
+            integrationId,
+            hubspotContactId: mapping.hubspotContactId,
+            hubspotCompanyId: companyResult.hubspotCompanyId,
+          });
+        }
+      } catch (companyError) {
+        logger.warn(
+          {
+            err: companyError,
+            integrationId,
+            hubspotContactId: mapping.hubspotContactId,
+          },
+          'company upsert or association failed on skipped contact loop',
+        );
+      }
+    }
+
     await syncEventsRepo.log({
       integrationId,
       direction,
       entityMappingId: mapping.id,
       status: 'skipped_loop',
-      detail: { hash, sourceId: sourceRecord.id, previousWriteBy: mapping.sourceOfLastWrite },
+      detail: {
+        hash,
+        sourceId: sourceRecord.id,
+        previousWriteBy: mapping.sourceOfLastWrite,
+        ...(hubspotCompanyId ? { hubspotCompanyId } : {}),
+      },
     });
     return {
       status: 'skipped_loop',
       entityMappingId: mapping.id,
       hubspotContactId: mapping.hubspotContactId,
       oxidCustomerId: mapping.oxidCustomerId,
+      hubspotCompanyId,
     };
   }
 
@@ -296,12 +329,49 @@ export async function syncContact(input: SyncContactInput): Promise<SyncContactR
     const linked = await entityMappingsRepo.linkCounterpart(integrationId, mapping.id, link);
     await entityMappingsRepo.recordSync(integrationId, linked.id, { hash, source: origin });
 
+    let hubspotCompanyId: string | null = null;
+    if (direction === 'oxid_to_hubspot') {
+      try {
+        const companyResult = await syncCompanyFromContact({ integration, contact });
+        if (companyResult.hubspotCompanyId) {
+          hubspotCompanyId = companyResult.hubspotCompanyId;
+          await associateContactWithCompany({
+            integrationId,
+            hubspotContactId: destinationId,
+            hubspotCompanyId: companyResult.hubspotCompanyId,
+          });
+        }
+      } catch (companyError) {
+        // Contact sync succeeded; company/association failures are logged but do not fail the job.
+        logger.warn(
+          {
+            err: companyError,
+            integrationId,
+            hubspotContactId: destinationId,
+          },
+          'company upsert or association failed after contact sync',
+        );
+        await syncEventsRepo.log({
+          integrationId,
+          direction,
+          entityMappingId: linked.id,
+          status: 'error',
+          detail: {
+            reason: 'company_sync_failed',
+            sourceId: sourceRecord.id,
+            message: describeError(companyError).message,
+          },
+        });
+      }
+    }
+
     const result: SyncContactResult = {
       status: 'success',
       entityMappingId: linked.id,
       hubspotContactId:
         direction === 'oxid_to_hubspot' ? destinationId : linked.hubspotContactId,
       oxidCustomerId: email,
+      hubspotCompanyId,
     };
 
     await syncEventsRepo.log({
@@ -314,11 +384,18 @@ export async function syncContact(input: SyncContactInput): Promise<SyncContactR
         destinationId,
         hash,
         fields: Object.keys(contact),
+        ...(hubspotCompanyId ? { hubspotCompanyId } : {}),
       },
     });
 
     logger.info(
-      { integrationId, direction, sourceId: sourceRecord.id, destinationId },
+      {
+        integrationId,
+        direction,
+        sourceId: sourceRecord.id,
+        destinationId,
+        hubspotCompanyId,
+      },
       'contact synced',
     );
 

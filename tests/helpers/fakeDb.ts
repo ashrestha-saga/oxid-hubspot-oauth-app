@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { CompanyMappingRow } from '../../src/db/repositories/companyMappings';
 import type { EntityMappingRow } from '../../src/db/repositories/entityMappings';
 import type { IntegrationRow } from '../../src/db/repositories/integrations';
 import type { SyncEventInput } from '../../src/db/repositories/syncEvents';
@@ -14,6 +15,7 @@ export interface SyncEventRecord extends SyncEventInput {
 const state = {
   integrations: [] as IntegrationRow[],
   mappings: [] as EntityMappingRow[],
+  companyMappings: [] as CompanyMappingRow[],
   events: [] as SyncEventRecord[],
   jobs: [] as SyncJobRow[],
 };
@@ -21,6 +23,7 @@ const state = {
 export function resetFakeDb(): void {
   state.integrations = [];
   state.mappings = [];
+  state.companyMappings = [];
   state.events = [];
   state.jobs = [];
 }
@@ -424,6 +427,90 @@ export const fakeEntityMappingsRepo = {
       (row) => !(row.id === id && row.integrationId === integrationId),
     );
     return before - state.mappings.length;
+  },
+};
+
+export const fakeCompanyMappingsRepo = {
+  async findById(integrationId: string, id: string) {
+    return (
+      state.companyMappings.find((row) => row.id === id && row.integrationId === integrationId) ??
+      null
+    );
+  },
+  async findByCompanyKey(integrationId: string, companyKey: string) {
+    return (
+      state.companyMappings.find(
+        (row) => row.integrationId === integrationId && row.companyKey === companyKey,
+      ) ?? null
+    );
+  },
+  async findByHubspotCompanyId(integrationId: string, hubspotCompanyId: string) {
+    return (
+      state.companyMappings.find(
+        (row) =>
+          row.integrationId === integrationId && row.hubspotCompanyId === hubspotCompanyId,
+      ) ?? null
+    );
+  },
+  async create(input: {
+    integrationId: string;
+    companyKey: string;
+    companyName?: string | null;
+    hubspotCompanyId?: string | null;
+  }) {
+    const existing = await fakeCompanyMappingsRepo.findByCompanyKey(
+      input.integrationId,
+      input.companyKey,
+    );
+    if (existing) return existing;
+    const now = new Date();
+    const row: CompanyMappingRow = {
+      id: randomUUID(),
+      integrationId: input.integrationId,
+      companyKey: input.companyKey,
+      companyName: input.companyName ?? null,
+      hubspotCompanyId: input.hubspotCompanyId ?? null,
+      lastSyncedAt: null,
+      lastSyncedHash: null,
+      sourceOfLastWrite: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    state.companyMappings.push(row);
+    return row;
+  },
+  async upsertByCompanyKey(input: {
+    integrationId: string;
+    companyKey: string;
+    companyName?: string | null;
+    hubspotCompanyId?: string | null;
+  }) {
+    const existing = await fakeCompanyMappingsRepo.findByCompanyKey(
+      input.integrationId,
+      input.companyKey,
+    );
+    if (existing) {
+      if (input.companyName !== undefined) existing.companyName = input.companyName;
+      if (input.hubspotCompanyId !== undefined) {
+        existing.hubspotCompanyId = input.hubspotCompanyId;
+      }
+      existing.updatedAt = new Date();
+      return existing;
+    }
+    return fakeCompanyMappingsRepo.create(input);
+  },
+  async recordSync(
+    integrationId: string,
+    id: string,
+    input: { hash: string; source: string; at?: Date },
+  ) {
+    const row = await fakeCompanyMappingsRepo.findById(integrationId, id);
+    if (!row) return 0;
+    row.lastSyncedHash = input.hash;
+    row.sourceOfLastWrite = input.source;
+    row.lastSyncedAt = input.at ?? new Date();
+    row.updatedAt = new Date();
+    return 1;
   },
 };
 

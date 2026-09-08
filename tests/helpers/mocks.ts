@@ -1,5 +1,6 @@
 import { vi } from 'vitest';
 import {
+  fakeCompanyMappingsRepo,
   fakeEntityMappingsRepo,
   fakeIntegrationsRepo,
   fakeSyncEventsRepo,
@@ -17,6 +18,12 @@ vi.mock('../../src/db/repositories/entityMappings', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../src/db/repositories/entityMappings')>();
   return { ...actual, entityMappingsRepo: fakeEntityMappingsRepo };
+});
+
+vi.mock('../../src/db/repositories/companyMappings', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../src/db/repositories/companyMappings')>();
+  return { ...actual, companyMappingsRepo: fakeCompanyMappingsRepo };
 });
 
 vi.mock('../../src/db/repositories/syncEvents', async (importOriginal) => {

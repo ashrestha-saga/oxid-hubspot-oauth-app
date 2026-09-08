@@ -120,7 +120,8 @@ export function defaultTenantFieldMap(): TenantFieldMap {
       return {
         canonical: field.canonical,
         oxidPath,
-        hubspotProperty: field.hubspot,
+        // Company lives on HubSpot Company objects + association, not contact.company text.
+        hubspotProperty: field.canonical === 'company' ? null : field.hubspot,
         transform,
       };
     }),
@@ -283,8 +284,8 @@ export function canonicalFromOxidUser(
 
   const fields: CanonicalContact = {};
   for (const binding of map.fields) {
-    // Unmapped OXID paths stay out of the sync payload (e.g. oxidId left blank).
-    if (!binding.oxidPath || !binding.hubspotProperty) continue;
+    // Need an OXID path to read; HubSpot property may be null (e.g. company → Company object).
+    if (!binding.oxidPath) continue;
     fields[binding.canonical] = normalizeValue(
       binding.canonical,
       readOxidBinding(user, binding),
