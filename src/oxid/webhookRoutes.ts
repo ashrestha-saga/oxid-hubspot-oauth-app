@@ -1,16 +1,21 @@
 import { Router } from 'express';
+import type { Prisma } from '@prisma/client';
 import { integrationsRepo, oxidWebhookSecret } from '../db/repositories/integrations';
 import { syncJobsRepo } from '../db/repositories/syncJobs';
 import { verifyOxidSignature } from '../lib/hmac';
 import { logger } from '../lib/logger';
 import { asyncHandler } from '../http/asyncHandler';
 import { parseJsonBody, rawBodyOf } from '../http/rawBody';
-import { dedupeKeyFor } from '../sync/queue';
+import { dedupeKeyFor, orderDedupeKey } from '../sync/queue';
 import {
   discoverOxidPayloadKeys,
   parseTenantFieldMap,
   suggestMapFromKeys,
 } from '../sync/tenantFieldMap';
+import {
+  parseClosedOrderWebhook,
+  type ClosedOrderJobPayload,
+} from './orderWebhookPayload';
 import { parseOxidWebhook, shopIdFrom, sourceRecordFromWebhook } from './webhookPayload';
 
 export const oxidWebhookRouter = Router();
@@ -138,5 +143,71 @@ oxidWebhookRouter.post(
       suggestedMap: suggested,
       sampleStored: true,
     });
+  }),
+);
+
+/**
+ * Closed-order webhook: HMAC same as customer events, then enqueue deal sync.
+ * URL: POST /webhooks/oxid/:oxidShopId/orders
+ */
+oxidWebhookRouter.post(
+  '/:oxidShopId/orders',
+  asyncHandler(async (req, res) => {
+    const { oxidShopId } = req.params as { oxidShopId: string };
+
+    const integration = await integrationsRepo.findByOxidShopId(oxidShopId);
+    if (!integration || !integration.oxidWebhookSecret) {
+      logger.warn({ oxidShopId }, 'order webhook for unknown OXID shop');
+      res.status(404).json({ error: 'not_found', message: 'unknown oxidShopId' });
+      return;
+    }
+
+    const verification = verifyOxidSignature({
+      rawBody: rawBodyOf(req),
+      signature: req.get('x-mwv-signature'),
+      timestamp: req.get('x-mwv-timestamp'),
+      secret: oxidWebhookSecret(integration),
+    });
+
+    if (!verification.ok) {
+      logger.warn({ oxidShopId, reason: verification.reason }, 'rejected OXID order webhook');
+      res.status(401).json({ error: 'invalid_signature', message: verification.reason });
+      return;
+    }
+
+    if (integration.status !== 'active') {
+      res.status(409).json({ error: 'integration_not_ready', message: `status ${integration.status}` });
+      return;
+    }
+
+    const parsed = parseClosedOrderWebhook(parseJsonBody(req));
+    if (!parsed.ok) {
+      res.status(400).json({ error: 'bad_request', message: parsed.message });
+      return;
+    }
+
+    const jobPayload: ClosedOrderJobPayload = {
+      kind: 'closed_order',
+      order: parsed.order,
+    };
+
+    const { jobId, deduped } = await syncJobsRepo.enqueue({
+      integrationId: integration.id,
+      direction: 'oxid_to_hubspot',
+      dedupeKey: orderDedupeKey(parsed.order.oxidOrderId),
+      payload: jobPayload as unknown as Prisma.InputJsonValue,
+    });
+
+    logger.debug(
+      {
+        integrationId: integration.id,
+        oxidOrderId: parsed.order.oxidOrderId,
+        jobId,
+        deduped,
+      },
+      'OXID closed-order webhook queued',
+    );
+
+    res.status(202).json({ status: 'queued', jobId, deduped });
   }),
 );

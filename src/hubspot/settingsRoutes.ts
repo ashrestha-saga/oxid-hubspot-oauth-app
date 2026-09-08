@@ -69,6 +69,9 @@ settingsRouter.get(
       webhookUrl: integration.oxidShopId
         ? `${env.BASE_URL}/webhooks/oxid/${integration.oxidShopId}`
         : null,
+      ordersWebhookUrl: integration.oxidShopId
+        ? `${env.BASE_URL}/webhooks/oxid/${integration.oxidShopId}/orders`
+        : null,
       webhookSecret:
         oxidConnected && integration.oxidWebhookSecret
           ? oxidWebhookSecret(integration)

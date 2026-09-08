@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type {
   HubspotCompany,
   HubspotContact,
+  HubspotDeal,
+  HubspotLineItem,
   HubspotProperties,
 } from '../../src/hubspot/client';
 
@@ -12,7 +14,9 @@ import type {
 interface Store {
   contacts: Map<string, HubspotContact>;
   companies: Map<string, HubspotCompany>;
-  /** `${contactId}:${companyId}` pairs. */
+  deals: Map<string, HubspotDeal>;
+  lineItems: Map<string, HubspotLineItem>;
+  /** `${fromId}:${toId}` pairs. */
   associations: Set<string>;
   writes: number;
   reads: number;
@@ -26,6 +30,8 @@ function storeFor(integrationId: string): Store {
     store = {
       contacts: new Map(),
       companies: new Map(),
+      deals: new Map(),
+      lineItems: new Map(),
       associations: new Set(),
       writes: 0,
       reads: 0,
@@ -42,6 +48,8 @@ export function resetFakeHubspot(): void {
 export function fakeHubspotStore(integrationId: string): {
   contacts: HubspotContact[];
   companies: HubspotCompany[];
+  deals: HubspotDeal[];
+  lineItems: HubspotLineItem[];
   associations: string[];
   writes: number;
   reads: number;
@@ -50,6 +58,8 @@ export function fakeHubspotStore(integrationId: string): {
   return {
     contacts: [...store.contacts.values()].map((contact) => ({ ...contact })),
     companies: [...store.companies.values()].map((company) => ({ ...company })),
+    deals: [...store.deals.values()].map((deal) => ({ ...deal })),
+    lineItems: [...store.lineItems.values()].map((item) => ({ ...item })),
     associations: [...store.associations],
     writes: store.writes,
     reads: store.reads,
@@ -214,6 +224,41 @@ export class FakeHubspotClient {
     const store = storeFor(this.integrationId);
     store.writes += 1;
     store.associations.add(`${contactId}:${companyId}`);
+  }
+
+  async createDeal(
+    properties: HubspotProperties,
+    associations: { contactId: string; companyId?: string | null },
+  ): Promise<HubspotDeal> {
+    const store = storeFor(this.integrationId);
+    store.writes += 1;
+    const deal: HubspotDeal = {
+      id: `hs-deal-${randomUUID()}`,
+      properties: { ...properties },
+      updatedAt: new Date().toISOString(),
+    };
+    store.deals.set(deal.id, deal);
+    store.associations.add(`${deal.id}:${associations.contactId}`);
+    if (associations.companyId) {
+      store.associations.add(`${deal.id}:${associations.companyId}`);
+    }
+    return { ...deal, properties: { ...deal.properties } };
+  }
+
+  async createLineItem(
+    properties: HubspotProperties,
+    dealId: string,
+  ): Promise<HubspotLineItem> {
+    const store = storeFor(this.integrationId);
+    store.writes += 1;
+    const lineItem: HubspotLineItem = {
+      id: `hs-li-${randomUUID()}`,
+      properties: { ...properties },
+      updatedAt: new Date().toISOString(),
+    };
+    store.lineItems.set(lineItem.id, lineItem);
+    store.associations.add(`${lineItem.id}:${dealId}`);
+    return { ...lineItem, properties: { ...lineItem.properties } };
   }
 }
 

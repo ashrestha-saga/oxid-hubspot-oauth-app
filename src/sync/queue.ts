@@ -8,3 +8,8 @@ import type { SyncDirection } from '../types';
 export function dedupeKeyFor(direction: SyncDirection, recordId: string): string {
   return `${direction}:${recordId}`;
 }
+
+/** Closed-order jobs: separate namespace from contact sync keys. */
+export function orderDedupeKey(oxidOrderId: string): string {
+  return `oxid_to_hubspot:order:${oxidOrderId}`;
+}

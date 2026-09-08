@@ -15,6 +15,18 @@ export interface HubspotCompany {
   updatedAt: string | null;
 }
 
+export interface HubspotDeal {
+  id: string;
+  properties: Record<string, string | null>;
+  updatedAt: string | null;
+}
+
+export interface HubspotLineItem {
+  id: string;
+  properties: Record<string, string | null>;
+  updatedAt: string | null;
+}
+
 export type HubspotProperties = Record<string, string | null>;
 
 interface SearchResponse {
@@ -66,6 +78,35 @@ function companyFrom(raw: {
     updatedAt: raw.updatedAt ?? null,
   };
 }
+
+function dealFrom(raw: {
+  id: string;
+  properties?: HubspotProperties;
+  updatedAt?: string;
+}): HubspotDeal {
+  return {
+    id: String(raw.id),
+    properties: raw.properties ?? {},
+    updatedAt: raw.updatedAt ?? null,
+  };
+}
+
+function lineItemFrom(raw: {
+  id: string;
+  properties?: HubspotProperties;
+  updatedAt?: string;
+}): HubspotLineItem {
+  return {
+    id: String(raw.id),
+    properties: raw.properties ?? {},
+    updatedAt: raw.updatedAt ?? null,
+  };
+}
+
+/** HubSpot-defined association type ids used on deal / line item creates. */
+const ASSOC_DEAL_TO_CONTACT = 3;
+const ASSOC_DEAL_TO_COMPANY = 5;
+const ASSOC_LINE_ITEM_TO_DEAL = 20;
 
 /** HubSpot signals "already exists" with a 409 that carries the winning id. */
 function existingIdFromConflict(body: string): string | null {
@@ -362,6 +403,77 @@ export class HubspotClient {
       method: 'PUT',
       path: `/crm/v4/objects/contacts/${encodeURIComponent(contactId)}/associations/default/companies/${encodeURIComponent(companyId)}`,
     });
+  }
+
+  async createDeal(
+    properties: HubspotProperties,
+    associations: { contactId: string; companyId?: string | null },
+  ): Promise<HubspotDeal> {
+    const associationPayload: Array<{
+      to: { id: string };
+      types: Array<{ associationCategory: string; associationTypeId: number }>;
+    }> = [
+      {
+        to: { id: associations.contactId },
+        types: [
+          {
+            associationCategory: 'HUBSPOT_DEFINED',
+            associationTypeId: ASSOC_DEAL_TO_CONTACT,
+          },
+        ],
+      },
+    ];
+
+    if (associations.companyId) {
+      associationPayload.push({
+        to: { id: associations.companyId },
+        types: [
+          {
+            associationCategory: 'HUBSPOT_DEFINED',
+            associationTypeId: ASSOC_DEAL_TO_COMPANY,
+          },
+        ],
+      });
+    }
+
+    const { body } = await this.request<{
+      id: string;
+      properties?: HubspotProperties;
+      updatedAt?: string;
+    }>({
+      method: 'POST',
+      path: '/crm/v3/objects/deals',
+      body: { properties, associations: associationPayload },
+    });
+
+    return dealFrom(body as { id: string; properties?: HubspotProperties });
+  }
+
+  async createLineItem(properties: HubspotProperties, dealId: string): Promise<HubspotLineItem> {
+    const { body } = await this.request<{
+      id: string;
+      properties?: HubspotProperties;
+      updatedAt?: string;
+    }>({
+      method: 'POST',
+      path: '/crm/v3/objects/line_items',
+      body: {
+        properties,
+        associations: [
+          {
+            to: { id: dealId },
+            types: [
+              {
+                associationCategory: 'HUBSPOT_DEFINED',
+                associationTypeId: ASSOC_LINE_ITEM_TO_DEAL,
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    return lineItemFrom(body as { id: string; properties?: HubspotProperties });
   }
 }
 

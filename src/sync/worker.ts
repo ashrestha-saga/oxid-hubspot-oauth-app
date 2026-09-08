@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { env } from '../config/env';
+import { integrationsRepo } from '../db/repositories/integrations';
 import { syncJobsRepo, type SyncJobRow } from '../db/repositories/syncJobs';
 import { isAppError, describeError } from '../lib/errors';
 import { logger } from '../lib/logger';
+import type { ClosedOrderJobPayload } from '../oxid/orderWebhookPayload';
 import type { SyncDirection } from '../types';
+import { processClosedOrder } from './processClosedOrder';
 import { syncContact, type SourceRecord, type SyncContactResult } from './syncContact';
 
 /** Jobs whose worker died are returned to the pool after this long. */
@@ -15,6 +18,15 @@ export interface WorkerOptions {
   maxAttempts?: number;
   /** Jobs to drain per tick before yielding. */
   batchSize?: number;
+}
+
+function isClosedOrderPayload(payload: unknown): payload is ClosedOrderJobPayload {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    (payload as ClosedOrderJobPayload).kind === 'closed_order' &&
+    typeof (payload as ClosedOrderJobPayload).order === 'object'
+  );
 }
 
 export class SyncWorker {
@@ -77,10 +89,22 @@ export class SyncWorker {
     }
   }
 
-  private async process(job: SyncJobRow): Promise<SyncContactResult | null> {
-    const sourceRecord = job.payload as unknown as SourceRecord;
-
+  private async process(job: SyncJobRow): Promise<SyncContactResult | unknown | null> {
     try {
+      if (isClosedOrderPayload(job.payload)) {
+        const integration = await integrationsRepo.findById(job.integrationId);
+        if (!integration) {
+          throw new Error(`integration ${job.integrationId} not found`);
+        }
+        const result = await processClosedOrder({
+          integration,
+          order: job.payload.order,
+        });
+        await syncJobsRepo.markDone(job.id);
+        return result;
+      }
+
+      const sourceRecord = job.payload as unknown as SourceRecord;
       const result = await syncContact({
         integrationId: job.integrationId,
         direction: job.direction as SyncDirection,
