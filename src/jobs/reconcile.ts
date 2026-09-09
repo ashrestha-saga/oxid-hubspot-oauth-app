@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { env } from '../config/env';
 import { entityMappingsRepo } from '../db/repositories/entityMappings';
 import { integrationsRepo, type IntegrationRow } from '../db/repositories/integrations';
@@ -65,7 +66,7 @@ async function enqueueIfChanged(
     integrationId,
     direction,
     dedupeKey: dedupeKeyFor(direction, record.id),
-    payload: { ...record },
+    payload: { ...record } as unknown as Prisma.InputJsonValue,
   });
   return true;
 }

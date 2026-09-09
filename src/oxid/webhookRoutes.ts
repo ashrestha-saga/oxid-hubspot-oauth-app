@@ -81,7 +81,7 @@ oxidWebhookRouter.post(
       integrationId: integration.id,
       direction: 'oxid_to_hubspot',
       dedupeKey: dedupeKeyFor('oxid_to_hubspot', sourceRecord.id),
-      payload: { ...sourceRecord },
+      payload: { ...sourceRecord } as unknown as Prisma.InputJsonValue,
     });
 
     logger.debug(
