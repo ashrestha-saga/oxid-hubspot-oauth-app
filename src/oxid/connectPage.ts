@@ -108,7 +108,7 @@ export function renderConnectPage(props: ConnectPageProps): string {
       <label for="client-secret">OAuth Client Secret</label>
       <input id="client-secret" name="clientSecret" type="password" placeholder="From OXID Admin → OAuth 2.0 Clients" required autocomplete="off" />
 
-      <p class="hint">Create an OAuth client in OXID Admin (MWV API → OAuth 2.0 Clients) with redirect URI:<br /><code>${escapeHtml(redirectUri)}</code><br />Scopes: <code>profile address api</code>. PKCE must be enabled.</p>
+      <p class="hint">Create an OAuth client in OXID Admin (MWV API → OAuth 2.0 Clients) with redirect URI:<br /><code>${escapeHtml(redirectUri)}</code><br />Scopes: <code>objects.users.read objects.users.write api</code>. PKCE must be enabled.</p>
 
       <button type="submit">Authorize with OXID</button>
     </form>
